@@ -28,8 +28,8 @@ while true do
     if event == "mouse_click" then
 
         if x >= 5 and x <= 20 and y == 5 then
-            term.clear()
             term.setBackgroundColor(colors.black)
+            shell.run("clear")
             shell.run("apps/terminal.lua")
         end
 

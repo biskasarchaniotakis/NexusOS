@@ -57,23 +57,28 @@ local function splitCommand(line)
 end
 
 --------------------------------------------------
--- Redraw input line
+-- Redraw input
 --------------------------------------------------
 
 local function redraw(prompt, text, cursor)
     local _, y = term.getCursorPos()
+    local width = term.getSize()
 
+    -- Move to start of input
     term.setCursorPos(#prompt + 1, y)
 
-    -- Clear old input
-    write(string.rep(" ", math.max(0, term.getSize() - #prompt)))
+    -- Clear the entire input area
+    write(string.rep(" ", math.max(0, width - #prompt)))
 
-    -- Draw new input
+    -- Draw input
     term.setCursorPos(#prompt + 1, y)
     write(text)
 
     -- Put cursor at correct position
-    term.setCursorPos(#prompt + cursor + 1, y)
+    term.setCursorPos(
+        #prompt + cursor + 1,
+        y
+    )
 end
 
 --------------------------------------------------
@@ -101,7 +106,7 @@ local function getCompletions(text)
             end
         end
 
-        -- Built-in commands
+        -- NexusOS built-in commands
         local builtins = {
             "cd",
             "clear",
@@ -110,6 +115,7 @@ local function getCompletions(text)
 
         for _, command in ipairs(builtins) do
             if command:sub(1, #text) == text then
+
                 local exists = false
 
                 for _, match in ipairs(matches) do
@@ -131,7 +137,7 @@ local function getCompletions(text)
     end
 
     --------------------------------------------------
-    -- File/directory completion
+    -- Path completion
     --------------------------------------------------
 
     local lastArg = args[#args]
@@ -147,11 +153,16 @@ local function getCompletions(text)
         directory = "."
     end
 
-    if not fs.exists(directory) or not fs.isDir(directory) then
+    if not fs.exists(directory) then
+        return matches
+    end
+
+    if not fs.isDir(directory) then
         return matches
     end
 
     for _, file in ipairs(fs.list(directory)) do
+
         if file:sub(1, #partial) == partial then
             table.insert(matches, file)
         end
@@ -187,34 +198,77 @@ local function applyCompletion(text, matches, index)
 
     local lastArg = args[#args]
 
-    local directory = fs.getDir(lastArg)
-    local partial = fs.getName(lastArg)
-
-    local replacement = matches[index]
-
-    if directory ~= "" and directory ~= "." then
-        replacement = directory .. "/" .. replacement
+    if not lastArg then
+        return text
     end
 
-    local prefix = text:sub(1, #text - #partial)
+    -- Find the last slash in the argument.
+    --
+    -- /apps/ter
+    --        ^
+    --
+    -- prefix = /apps/
+    -- partial = ter
 
-    return prefix .. replacement
+    local slash = lastArg:match("^.*()/")
+
+    local prefix
+
+    if slash then
+        prefix = lastArg:sub(1, slash)
+    else
+        prefix = ""
+    end
+
+    local completed =
+        prefix .. matches[index]
+
+    -- Replace ONLY the last argument.
+    local beforeLast =
+        text:sub(1, #text - #lastArg)
+
+    return beforeLast .. completed
 end
 
 --------------------------------------------------
 -- Show autocomplete choices
 --------------------------------------------------
 
-local function showCompletions(prompt, text, matches)
+local function showCompletions(prompt, text, cursor, matches)
     local _, y = term.getCursorPos()
 
-    term.setCursorPos(1, y + 1)
+    --------------------------------------------------
+    -- Move below current line
+    --------------------------------------------------
+
+    if y < term.getSize() then
+        term.setCursorPos(1, y + 1)
+    else
+        term.scroll(1)
+        term.setCursorPos(1, y)
+    end
+
+    --------------------------------------------------
+    -- Print choices
+    --------------------------------------------------
 
     print(table.concat(matches, "    "))
 
-    -- Reprint prompt and command
+    --------------------------------------------------
+    -- New prompt
+    --------------------------------------------------
+
     write(prompt)
     write(text)
+
+    --------------------------------------------------
+    -- Cursor
+    --------------------------------------------------
+
+    term.setCursorPos(
+        #prompt + cursor + 1,
+        select(2, term.getCursorPos())
+    )
 end
 
 --------------------------------------------------
@@ -237,7 +291,7 @@ local function readCommand()
         local event, value = os.pullEvent()
 
         --------------------------------------------------
-        -- Character
+        -- Character typed
         --------------------------------------------------
 
         if event == "char" then
@@ -249,11 +303,15 @@ local function readCommand()
 
             cursor = cursor + 1
 
-            -- Reset autocomplete
+            -- Reset completion
             completionMatches = {}
             completionIndex = 0
 
-            redraw(prompt, text, cursor)
+            redraw(
+                prompt,
+                text,
+                cursor
+            )
 
         --------------------------------------------------
         -- Keyboard
@@ -288,7 +346,11 @@ local function readCommand()
                     completionMatches = {}
                     completionIndex = 0
 
-                    redraw(prompt, text, cursor)
+                    redraw(
+                        prompt,
+                        text,
+                        cursor
+                    )
                 end
 
             --------------------------------------------------
@@ -299,7 +361,12 @@ local function readCommand()
 
                 if cursor > 0 then
                     cursor = cursor - 1
-                    redraw(prompt, text, cursor)
+
+                    redraw(
+                        prompt,
+                        text,
+                        cursor
+                    )
                 end
 
             --------------------------------------------------
@@ -310,7 +377,12 @@ local function readCommand()
 
                 if cursor < #text then
                     cursor = cursor + 1
-                    redraw(prompt, text, cursor)
+
+                    redraw(
+                        prompt,
+                        text,
+                        cursor
+                    )
                 end
 
             --------------------------------------------------
@@ -320,7 +392,7 @@ local function readCommand()
             elseif value == keys.tab then
 
                 --------------------------------------------------
-                -- Find completions
+                -- Find matches
                 --------------------------------------------------
 
                 if #completionMatches == 0 then
@@ -335,7 +407,8 @@ local function readCommand()
                     --------------------------------------------------
 
                     if #completionMatches == 0 then
-                        -- Nothing happens
+
+                        -- Nothing to autocomplete.
 
                     --------------------------------------------------
                     -- One match
@@ -352,7 +425,11 @@ local function readCommand()
 
                         cursor = #text
 
-                        redraw(prompt, text, cursor)
+                        redraw(
+                            prompt,
+                            text,
+                            cursor
+                        )
 
                     --------------------------------------------------
                     -- Multiple matches
@@ -363,14 +440,13 @@ local function readCommand()
                         showCompletions(
                             prompt,
                             text,
+                            cursor,
                             completionMatches
                         )
-
-                        completionIndex = 1
                     end
 
                 --------------------------------------------------
-                -- Cycle completions
+                -- Cycle matches
                 --------------------------------------------------
 
                 else
@@ -393,11 +469,15 @@ local function readCommand()
 
                     cursor = #text
 
-                    redraw(prompt, text, cursor)
+                    redraw(
+                        prompt,
+                        text,
+                        cursor
+                    )
                 end
 
             --------------------------------------------------
-            -- UP / HISTORY
+            -- UP
             --------------------------------------------------
 
             elseif value == keys.up then
@@ -415,11 +495,18 @@ local function readCommand()
 
                     cursor = #text
 
-                    redraw(prompt, text, cursor)
+                    completionMatches = {}
+                    completionIndex = 0
+
+                    redraw(
+                        prompt,
+                        text,
+                        cursor
+                    )
                 end
 
             --------------------------------------------------
-            -- DOWN / HISTORY
+            -- DOWN
             --------------------------------------------------
 
             elseif value == keys.down then
@@ -441,7 +528,14 @@ local function readCommand()
 
                     cursor = #text
 
-                    redraw(prompt, text, cursor)
+                    completionMatches = {}
+                    completionIndex = 0
+
+                    redraw(
+                        prompt,
+                        text,
+                        cursor
+                    )
                 end
             end
         end
@@ -454,15 +548,26 @@ end
 
 while true do
 
-    local commandLine = readCommand()
+    --------------------------------------------------
+    -- Read command
+    --------------------------------------------------
+
+    local commandLine =
+        readCommand()
 
     --------------------------------------------------
-    -- Save history
+    -- History
     --------------------------------------------------
 
     if commandLine ~= "" then
-        table.insert(history, commandLine)
-        historyIndex = #history + 1
+
+        table.insert(
+            history,
+            commandLine
+        )
+
+        historyIndex =
+            #history + 1
     end
 
     --------------------------------------------------
@@ -472,13 +577,15 @@ while true do
     local args =
         splitCommand(commandLine)
 
-    local command = args[1]
+    local command =
+        args[1]
 
     --------------------------------------------------
     -- EXIT
     --------------------------------------------------
 
     if command == "exit" then
+
         break
 
     --------------------------------------------------
@@ -496,13 +603,11 @@ while true do
 
     elseif command == "cd" then
 
-        local path = args[2]
+        local path =
+            args[2] or "/"
 
-        if not path or path == "" then
-            path = "/"
-        end
-
-        local resolved = shell.resolve(path)
+        local resolved =
+            shell.resolve(path)
 
         if fs.exists(resolved)
             and fs.isDir(resolved) then
@@ -527,7 +632,7 @@ while true do
             shell.resolveProgram(command)
 
         --------------------------------------------------
-        -- Not found
+        -- Command doesn't exist
         --------------------------------------------------
 
         if program == nil then
@@ -538,7 +643,7 @@ while true do
             )
 
         --------------------------------------------------
-        -- Prevent shell.lua
+        -- Protect shell.lua
         --------------------------------------------------
 
         elseif fs.getName(program) == "shell.lua" then
@@ -546,14 +651,15 @@ while true do
             print("Access denied.")
 
         --------------------------------------------------
-        -- Run program
+        -- Execute program
         --------------------------------------------------
 
         else
 
-            -- Remove command from arguments
+            -- Remove command name.
             table.remove(args, 1)
 
+            -- Run with arguments.
             shell.run(
                 program,
                 table.unpack(args)
