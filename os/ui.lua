@@ -30,7 +30,7 @@ while true do
         if x >= 5 and x <= 20 and y == 5 then
             term.clear()
             term.setBackgroundColor(colors.black)
-            shell.run("shell")
+            shell.run("apps/terminal.lua")
         end
 
     end
