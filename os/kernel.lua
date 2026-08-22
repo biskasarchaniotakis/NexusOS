@@ -1,194 +1,174 @@
 -- NexusOS Kernel
 
+term.clear()
+term.setCursorPos(1, 1)
+term.setCursorBlink(true)
+
+print("Starting NEXUS OS...")
+sleep(1)
+
 --------------------------------------------------
 -- Load UI
 --------------------------------------------------
 
 local UI = dofile("/os/ui.lua")
 
---------------------------------------------------
--- Start UI
---------------------------------------------------
-
 UI.init()
 
 --------------------------------------------------
--- Desktop
+-- Screen
 --------------------------------------------------
 
-local screen = term.native()
-
-local width, height =
-    screen.getSize()
+local native = term.native()
+local sw, sh = native.getSize()
 
 --------------------------------------------------
--- Open Terminal
+-- Terminal process
 --------------------------------------------------
 
-local terminalWindow =
-    UI.createWindow(
-        "Terminal",
-        5,
-        3,
-        math.min(50, width - 2),
-        math.min(18, height - 2)
-    )
-
---------------------------------------------------
--- Run an application
---------------------------------------------------
-
-local function runApp(win, path)
-    if not fs.exists(path) then
-
-        local old = term.current()
-
-        term.redirect(
-            win.terminal
-        )
-
-        term.setBackgroundColor(colors.black)
-        term.setTextColor(colors.red)
-
-        term.clear()
-        term.setCursorPos(1, 1)
-
-        print("Application not found:")
-        print(path)
-
-        term.redirect(old)
-
-        return
-    end
-
-    --------------------------------------------------
-    -- Run app in its window
-    --------------------------------------------------
+local function runTerminal(win)
 
     local old = term.current()
 
-    term.redirect(
-        win.terminal
-    )
+    term.redirect(win.terminal)
 
-    local ok, err =
-        pcall(
-            function()
-                shell.run(path)
-            end
-        )
+    local ok, err = pcall(function()
+        shell.run("/apps/terminal.lua")
+    end)
 
     term.redirect(old)
 
-    --------------------------------------------------
-    -- Application crashed
-    --------------------------------------------------
-
-    if not ok then
-
-        term.redirect(
-            win.terminal
-        )
-
-        win.terminal.setTextColor(
-            colors.red
-        )
-
-        win.terminal.setCursorPos(
-            1,
-            win.terminal.getCursorPos()
-        )
-
-        win.terminal.write(
-            "Application crashed: "
-                .. tostring(err)
-        )
-
-        term.redirect(old)
+    if not ok and win.visible then
+        win.terminal.setTextColor(colors.red)
+        win.terminal.setCursorPos(1, 1)
+        win.terminal.write("Terminal error:")
+        win.terminal.setCursorPos(1, 2)
+        win.terminal.write(tostring(err))
     end
 end
 
 --------------------------------------------------
--- Start Terminal
+-- Create terminal
 --------------------------------------------------
 
-runApp(
-    terminalWindow,
-    "/apps/terminal.lua"
-)
+local function createTerminal()
+
+    local offset = (#UI.windows % 4) * 3
+
+    local win = UI.createWindow(
+        "Terminal",
+        4 + offset,
+        3 + offset,
+        math.min(52, sw - 2),
+        math.min(18, sh - 2)
+    )
+
+    return win
+end
 
 --------------------------------------------------
--- Main NexusOS event loop
+-- Start menu launcher
 --------------------------------------------------
 
-while true do
+UI.onLaunch = function(app)
 
-    local event = {
-        os.pullEvent()
-    }
+    if app == "terminal" then
 
-    --------------------------------------------------
-    -- Mouse click
-    --------------------------------------------------
+        local win = createTerminal()
 
-    if event[1] == "mouse_click" then
+        -- Run terminal in a coroutine
+        -- without stopping the UI.
+        parallel.waitForAny(
+            function()
+                runTerminal(win)
+            end,
 
-        UI.handleEvent(
-            table.unpack(event)
+            function()
+                while win.visible do
+                    os.pullEvent()
+                end
+            end
         )
 
-    --------------------------------------------------
-    -- Mouse drag
-    --------------------------------------------------
+    end
+end
 
-    elseif event[1] == "mouse_drag" then
+--------------------------------------------------
+-- Window close
+--------------------------------------------------
 
-        UI.handleEvent(
-            table.unpack(event)
-        )
+UI.onClose = function(win)
 
-    --------------------------------------------------
-    -- Mouse release
-    --------------------------------------------------
+    win.visible = false
 
-    elseif event[1] == "mouse_up" then
+    if win.terminal then
+        win.terminal.setVisible(false)
+    end
 
-        UI.handleEvent(
-            table.unpack(event)
-        )
+    for i, w in ipairs(UI.windows) do
+        if w == win then
+            table.remove(UI.windows, i)
+            break
+        end
+    end
 
-    --------------------------------------------------
-    -- Keyboard
-    --------------------------------------------------
+    UI.focused = nil
 
-    elseif event[1] == "key" then
+    -- Focus another window
+    for i = #UI.windows, 1, -1 do
 
-        --------------------------------------------------
-        -- F2 = new terminal
-        --------------------------------------------------
+        local other = UI.windows[i]
 
-        if event[2] == keys.f2 then
+        if other.visible
+            and not other.minimized then
 
-            local newTerminal =
-                UI.createWindow(
-                    "Terminal",
-                    8,
-                    5,
-                    math.min(50, width - 2),
-                    math.min(18, height - 2)
-                )
+            UI.focus(other)
+            break
+        end
+    end
 
-            --------------------------------------------------
-            -- Start terminal
-            --
-            -- NOTE:
-            -- This runs synchronously.
-            --------------------------------------------------
+    UI.draw()
+end
 
-            runApp(
-                newTerminal,
-                "/apps/terminal.lua"
+--------------------------------------------------
+-- Initial terminal
+--------------------------------------------------
+
+local firstTerminal = createTerminal()
+
+--------------------------------------------------
+-- GUI event loop
+--------------------------------------------------
+
+local function guiLoop()
+
+    while true do
+
+        local event = {
+            os.pullEvent()
+        }
+
+        if event[1] == "mouse_click"
+            or event[1] == "mouse_drag"
+            or event[1] == "mouse_up" then
+
+            UI.handleEvent(
+                table.unpack(event)
             )
         end
     end
 end
+
+--------------------------------------------------
+-- Run terminal + GUI together
+--------------------------------------------------
+
+parallel.waitForAny(
+
+    guiLoop,
+
+    function()
+        runTerminal(firstTerminal)
+    end
+
+)
