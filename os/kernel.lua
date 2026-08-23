@@ -1,10 +1,9 @@
 -- NexusOS Kernel
--- Event-routed application manager
---
--- Fixed application environment:
--- Applications are loaded with loadfile() instead of
--- shell.run() so they retain the normal CraftOS APIs,
--- including shell, fs, term, colors, keys, etc.
+-- Fixed application environment and event routing
+
+--------------------------------------------------
+-- Boot
+--------------------------------------------------
 
 term.clear()
 term.setCursorPos(1, 1)
@@ -14,7 +13,7 @@ print("Starting NEXUS OS...")
 sleep(1)
 
 --------------------------------------------------
--- Load UI
+-- UI
 --------------------------------------------------
 
 local UI = dofile("/os/ui.lua")
@@ -23,19 +22,20 @@ UI.init()
 
 local native = term.native()
 
-local screenW, screenH = native.getSize()
+local screenW, screenH =
+    native.getSize()
 
 --------------------------------------------------
--- Application processes
+-- Applications
 --------------------------------------------------
 
 local apps = {}
 
 --------------------------------------------------
--- Find application belonging to window
+-- Find app for window
 --------------------------------------------------
 
-local function getAppForWindow(win)
+local function getApp(win)
 
     for _, app in ipairs(apps) do
 
@@ -49,112 +49,73 @@ local function getAppForWindow(win)
 end
 
 --------------------------------------------------
--- Queue terminal resize event
+-- Error display
 --------------------------------------------------
 
-local function queueResize(app)
-
-    if not app
-        or app.dead
-        or app.closing then
-
-        return
-    end
-
-    if app.resizeQueued then
-        return
-    end
-
-    app.resizeQueued = true
-
-    table.insert(
-        app.queue,
-        {
-            "term_resize"
-        }
-    )
-end
-
---------------------------------------------------
--- Show application error
---------------------------------------------------
-
-local function showAppError(
-    app,
-    title,
-    err
-)
+local function showError(app, message)
 
     if not app
         or not app.window
         or not app.window.terminal then
-
         return
     end
 
-    local t = app.window.terminal
+    local t =
+        app.window.terminal
 
     t.setVisible(true)
 
-    t.setBackgroundColor(colors.black)
-    t.setTextColor(colors.red)
+    t.setBackgroundColor(
+        colors.black
+    )
+
+    t.setTextColor(
+        colors.red
+    )
 
     t.clear()
 
     t.setCursorPos(1, 1)
 
     t.write(
-        title or "Application error:"
+        "APPLICATION ERROR"
     )
-
-    --------------------------------------------------
-    -- Wrap error across terminal width.
-    --------------------------------------------------
 
     local width, height =
         t.getSize()
 
-    width = math.max(1, width)
-    height = math.max(1, height)
+    local text =
+        tostring(message)
 
-    local message =
-        tostring(err)
+    local y = 3
 
-    local y = 2
-
-    while #message > 0
+    while #text > 0
         and y <= height
     do
 
         local line =
-            message:sub(1, width)
+            text:sub(1, width)
 
-        message =
-            message:sub(#line + 1)
+        text =
+            text:sub(#line + 1)
 
         t.setCursorPos(1, y)
-
         t.write(line)
 
         y = y + 1
     end
-
-    t.setCursorBlink(false)
 end
 
 --------------------------------------------------
 -- Create application
 --------------------------------------------------
 
-local function createApp(
-    path,
-    title
-)
+local function createApp(path, title)
 
     if not fs.exists(path) then
 
         print(
-            "App not found: "
+            "Application not found: "
             .. path
         )
 
@@ -164,29 +125,31 @@ local function createApp(
     local offset =
         (#UI.windows % 4) * 3
 
+    local width =
+        math.min(
+            52,
+            math.max(
+                10,
+                screenW - 2
+            )
+        )
+
+    local height =
+        math.min(
+            18,
+            math.max(
+                5,
+                screenH - 2
+            )
+        )
+
     local win =
         UI.createWindow(
-            title
-                or fs.getName(path),
-
+            title,
             4 + offset,
             3 + offset,
-
-            math.min(
-                52,
-                math.max(
-                    10,
-                    screenW - 2
-                )
-            ),
-
-            math.min(
-                18,
-                math.max(
-                    5,
-                    screenH - 2
-                )
-            )
+            width,
+            height
         )
 
     local app = {
@@ -201,9 +164,7 @@ local function createApp(
 
         closing = false,
 
-        resizeQueued = false,
-
-        program = nil
+        resizeQueued = false
     }
 
     table.insert(
@@ -212,34 +173,54 @@ local function createApp(
     )
 
     --------------------------------------------------
-    -- Load application
-    --
     -- IMPORTANT:
     --
-    -- loadfile() uses the normal CraftOS global
-    -- environment.
+    -- Explicit CraftOS environment.
     --
-    -- This means applications receive:
-    --
-    -- shell
-    -- fs
-    -- term
-    -- colors
-    -- keys
-    -- os
-    -- peripheral
-    -- window
-    -- etc.
+    -- This prevents shell/fs/term/etc from becoming
+    -- nil when the application is loaded.
+    --------------------------------------------------
+
+    local appEnv = {}
+
+    setmetatable(
+        appEnv,
+        {
+            __index = _G
+        }
+    )
+
+    --------------------------------------------------
+    -- Explicitly guarantee CraftOS APIs.
+    --------------------------------------------------
+
+    appEnv.shell = shell
+    appEnv.fs = fs
+    appEnv.term = term
+    appEnv.colors = colors
+    appEnv.keys = keys
+    appEnv.os = os
+    appEnv.window = window
+    appEnv.peripheral = peripheral
+    appEnv.redstone = redstone
+    appEnv.textutils = textutils
+    appEnv.paintutils = paintutils
+
+    --------------------------------------------------
+    -- Load application using explicit environment.
     --------------------------------------------------
 
     local program, loadError =
-        loadfile(path)
+        loadfile(
+            path,
+            "t",
+            appEnv
+        )
 
     if not program then
 
-        showAppError(
+        showError(
             app,
-            "Application failed to load:",
             loadError
         )
 
@@ -247,8 +228,6 @@ local function createApp(
 
         return app
     end
-
-    app.program = program
 
     --------------------------------------------------
     -- Application coroutine
@@ -261,10 +240,6 @@ local function createApp(
                 local old =
                     term.current()
 
-                --------------------------------------------------
-                -- Redirect terminal to application window.
-                --------------------------------------------------
-
                 term.redirect(
                     win.terminal
                 )
@@ -272,62 +247,31 @@ local function createApp(
                 local ok, err =
                     pcall(
                         function()
-
-                            --------------------------------------------------
-                            -- Run the application directly.
-                            --
-                            -- DO NOT use shell.run() here.
-                            --------------------------------------------------
-
                             program()
-
                         end
                     )
 
-                --------------------------------------------------
-                -- Always restore the previous terminal.
-                --------------------------------------------------
-
                 term.redirect(old)
 
-                --------------------------------------------------
-                -- Normal application exit.
-                --------------------------------------------------
+                if not ok then
 
-                if ok then
+                    if not app.closing then
 
-                    app.dead = true
+                        showError(
+                            app,
+                            err
+                        )
 
-                    return
+                    end
+
                 end
-
-                --------------------------------------------------
-                -- Closing is expected.
-                --------------------------------------------------
-
-                if app.closing then
-
-                    app.dead = true
-
-                    return
-                end
-
-                --------------------------------------------------
-                -- Application crashed.
-                --------------------------------------------------
-
-                showAppError(
-                    app,
-                    "Application crashed:",
-                    err
-                )
 
                 app.dead = true
             end
         )
 
     --------------------------------------------------
-    -- Start application.
+    -- Start program
     --------------------------------------------------
 
     local old =
@@ -346,9 +290,8 @@ local function createApp(
 
     if not ok then
 
-        showAppError(
+        showError(
             app,
-            "Application failed to start:",
             err
         )
 
@@ -359,10 +302,125 @@ local function createApp(
 end
 
 --------------------------------------------------
--- Remove dead applications
+-- Queue event
 --------------------------------------------------
 
-local function cleanupApps()
+local function sendEvent(app, event)
+
+    if not app
+        or app.dead
+        or app.closing then
+        return
+    end
+
+    if not app.window.visible
+        or app.window.minimized then
+        return
+    end
+
+    --------------------------------------------------
+    -- Convert screen mouse coordinates into
+    -- application terminal coordinates.
+    --------------------------------------------------
+
+    if event[1] == "mouse_click"
+        or event[1] == "mouse_drag"
+        or event[1] == "mouse_up"
+    then
+
+        local button =
+            event[2]
+
+        local x =
+            event[3]
+            - app.window.x
+            - 1
+
+        local y =
+            event[4]
+            - app.window.y
+            - 2
+
+        event = {
+            event[1],
+            button,
+            x,
+            y
+        }
+    end
+
+    table.insert(
+        app.queue,
+        event
+    )
+end
+
+--------------------------------------------------
+-- Resume applications
+--------------------------------------------------
+
+local function resumeApps()
+
+    for _, app in ipairs(apps) do
+
+        if not app.dead
+            and #app.queue > 0
+        then
+
+            local event =
+                table.remove(
+                    app.queue,
+                    1
+                )
+
+            if event[1] ==
+                "term_resize"
+            then
+                app.resizeQueued = false
+            end
+
+            if coroutine.status(app.co)
+                ~= "dead"
+            then
+
+                local old =
+                    term.current()
+
+                term.redirect(
+                    app.window.terminal
+                )
+
+                local ok, err =
+                    coroutine.resume(
+                        app.co,
+                        table.unpack(event)
+                    )
+
+                term.redirect(old)
+
+                if not ok then
+
+                    app.dead = true
+
+                    if not app.closing then
+
+                        showError(
+                            app,
+                            err
+                        )
+
+                    end
+                end
+            end
+        end
+    end
+end
+
+--------------------------------------------------
+-- Cleanup
+--------------------------------------------------
+
+local function cleanup()
 
     for i = #apps, 1, -1 do
 
@@ -393,245 +451,44 @@ local function cleanupApps()
 end
 
 --------------------------------------------------
--- Send event to application
---------------------------------------------------
-
-local function sendToApp(
-    app,
-    event
-)
-
-    if not app
-        or app.dead
-        or app.closing
-        or not app.window.visible
-        or app.window.minimized then
-
-        return
-    end
-
-    --------------------------------------------------
-    -- Translate mouse coordinates from screen
-    -- coordinates to application-terminal coordinates.
-    --------------------------------------------------
-
-    if event[1] == "mouse_click"
-        or event[1] == "mouse_up"
-        or event[1] == "mouse_drag"
-    then
-
-        local button =
-            event[2]
-
-        local x =
-            event[3]
-            - app.window.x
-            - 1
-
-        local y =
-            event[4]
-            - app.window.y
-            - 2
-
-        event = {
-
-            event[1],
-
-            button,
-
-            x,
-
-            y
-        }
-    end
-
-    table.insert(
-        app.queue,
-        event
-    )
-end
-
---------------------------------------------------
--- Resume applications
---------------------------------------------------
-
-local function resumeApps()
-
-    for _, app in ipairs(apps) do
-
-        if not app.dead
-            and #app.queue > 0
-        then
-
-            local event =
-                table.remove(
-                    app.queue,
-                    1
-                )
-
-            --------------------------------------------------
-            -- Resize event consumed.
-            --------------------------------------------------
-
-            if event[1] == "term_resize" then
-
-                app.resizeQueued = false
-
-            end
-
-            --------------------------------------------------
-            -- Resume coroutine.
-            --------------------------------------------------
-
-            if coroutine.status(app.co)
-                ~= "dead"
-            then
-
-                local old =
-                    term.current()
-
-                term.redirect(
-                    app.window.terminal
-                )
-
-                local ok, err =
-                    coroutine.resume(
-                        app.co,
-                        table.unpack(event)
-                    )
-
-                term.redirect(old)
-
-                --------------------------------------------------
-                -- Application crashed.
-                --------------------------------------------------
-
-                if not ok then
-
-                    app.dead = true
-
-                    if not app.closing
-                        and app.window.visible
-                    then
-
-                        showAppError(
-                            app,
-                            "Application crashed:",
-                            err
-                        )
-
-                    end
-                end
-            end
-
-            --------------------------------------------------
-            -- Coroutine finished normally.
-            --------------------------------------------------
-
-            if coroutine.status(app.co)
-                == "dead"
-            then
-
-                app.dead = true
-
-            end
-        end
-    end
-end
-
---------------------------------------------------
--- Launch apps from Start Menu
---------------------------------------------------
-
-UI.onLaunch =
-    function(appName)
-
-        if appName == "terminal" then
-
-            createApp(
-                "/apps/terminal.lua",
-                "Terminal"
-            )
-
-        elseif appName == "files" then
-
-            if fs.exists(
-                "/apps/files.lua"
-            )
-            then
-
-                createApp(
-                    "/apps/files.lua",
-                    "Files"
-                )
-
-            else
-
-                print(
-                    "Files app not found."
-                )
-
-            end
-
-        elseif appName == "settings" then
-
-            if fs.exists(
-                "/apps/settings.lua"
-            )
-            then
-
-                createApp(
-                    "/apps/settings.lua",
-                    "Settings"
-                )
-
-            else
-
-                print(
-                    "Settings app not found."
-                )
-
-            end
-        end
-
-        UI.draw()
-    end
-
---------------------------------------------------
--- Window resize callback
+-- Resize callback
 --------------------------------------------------
 
 UI.onResize =
     function(win)
 
         local app =
-            getAppForWindow(win)
+            getApp(win)
 
-        if app then
-
-            queueResize(app)
-
+        if not app then
+            return
         end
+
+        if app.resizeQueued then
+            return
+        end
+
+        app.resizeQueued = true
+
+        table.insert(
+            app.queue,
+            {
+                "term_resize"
+            }
+        )
     end
 
 --------------------------------------------------
--- Close window
+-- Close callback
 --------------------------------------------------
 
 UI.onClose =
     function(win)
 
         local app =
-            getAppForWindow(win)
+            getApp(win)
 
-        --------------------------------------------------
-        -- Ask application to terminate.
-        --------------------------------------------------
-
-        if app
-            and not app.dead
-            and not app.closing
-        then
+        if app then
 
             app.closing = true
 
@@ -641,25 +498,16 @@ UI.onClose =
                     "terminate"
                 }
             )
-        end
 
-        --------------------------------------------------
-        -- Hide window immediately.
-        --------------------------------------------------
+            app.dead = true
+
+        end
 
         win.visible = false
 
         if win.terminal then
-
-            win.terminal.setVisible(
-                false
-            )
-
+            win.terminal.setVisible(false)
         end
-
-        --------------------------------------------------
-        -- Remove from UI.
-        --------------------------------------------------
 
         for i, w in ipairs(UI.windows) do
 
@@ -675,13 +523,11 @@ UI.onClose =
         end
 
         if UI.focused == win then
-
             UI.focused = nil
-
         end
 
         --------------------------------------------------
-        -- Focus another window.
+        -- Focus next window.
         --------------------------------------------------
 
         for i =
@@ -707,13 +553,60 @@ UI.onClose =
     end
 
 --------------------------------------------------
--- Mouse event routing
+-- Launch callback
+--------------------------------------------------
+
+UI.onLaunch =
+    function(name)
+
+        if name == "terminal" then
+
+            createApp(
+                "/apps/terminal.lua",
+                "Terminal"
+            )
+
+        elseif name == "files" then
+
+            createApp(
+                "/apps/files.lua",
+                "Files"
+            )
+
+        elseif name == "settings" then
+
+            if fs.exists(
+                "/apps/settings.lua"
+            ) then
+
+                createApp(
+                    "/apps/settings.lua",
+                    "Settings"
+                )
+
+            else
+
+                print(
+                    "Settings app not installed."
+                )
+
+            end
+        end
+
+        UI.draw()
+    end
+
+--------------------------------------------------
+-- Mouse handling
 --------------------------------------------------
 
 local function handleMouse(event)
 
     --------------------------------------------------
-    -- UI handles window chrome first.
+    -- UI gets first chance.
+    --
+    -- This handles dragging, resizing, minimize,
+    -- close, taskbar and Start menu.
     --------------------------------------------------
 
     local consumed =
@@ -722,25 +615,21 @@ local function handleMouse(event)
         )
 
     if consumed then
-
         return
-
     end
 
     --------------------------------------------------
-    -- Send content mouse events to focused app.
+    -- Send content clicks to focused app.
     --------------------------------------------------
 
-    local focused =
+    local win =
         UI.focused
 
-    if not focused
-        or not focused.visible
-        or focused.minimized
+    if not win
+        or not win.visible
+        or win.minimized
     then
-
         return
-
     end
 
     local x =
@@ -750,29 +639,23 @@ local function handleMouse(event)
         event[4]
 
     --------------------------------------------------
-    -- Check application content area.
+    -- Application content area.
     --------------------------------------------------
 
-    local inside =
-        x >= focused.x + 1
-        and x < focused.x + focused.width - 1
-        and y >= focused.y + 2
-        and y < focused.y + focused.height - 1
-
-    if not inside then
-
+    if x < win.x + 1
+        or x >= win.x + win.width - 1
+        or y < win.y + 2
+        or y >= win.y + win.height - 1
+    then
         return
-
     end
 
     local app =
-        getAppForWindow(
-            focused
-        )
+        getApp(win)
 
     if app then
 
-        sendToApp(
+        sendEvent(
             app,
             event
         )
@@ -781,31 +664,27 @@ local function handleMouse(event)
 end
 
 --------------------------------------------------
--- Keyboard routing
+-- Keyboard handling
 --------------------------------------------------
 
 local function handleKeyboard(event)
 
-    local focused =
+    local win =
         UI.focused
 
-    if not focused
-        or not focused.visible
-        or focused.minimized
+    if not win
+        or not win.visible
+        or win.minimized
     then
-
         return
-
     end
 
     local app =
-        getAppForWindow(
-            focused
-        )
+        getApp(win)
 
     if app then
 
-        sendToApp(
+        sendEvent(
             app,
             event
         )
@@ -814,7 +693,7 @@ local function handleKeyboard(event)
 end
 
 --------------------------------------------------
--- Start first terminal
+-- Start Terminal
 --------------------------------------------------
 
 createApp(
@@ -825,7 +704,7 @@ createApp(
 UI.draw()
 
 --------------------------------------------------
--- Main NexusOS event loop
+-- Main event loop
 --------------------------------------------------
 
 while true do
@@ -861,24 +740,37 @@ while true do
         handleKeyboard(event)
 
     --------------------------------------------------
-    -- Timer
+    -- Resize
     --------------------------------------------------
 
-    elseif name == "timer" then
+    elseif name == "term_resize" then
 
-        handleKeyboard(event)
+        for _, app in ipairs(apps) do
 
+            if not app.resizeQueued then
+
+                app.resizeQueued = true
+
+                table.insert(
+                    app.queue,
+                    {
+                        "term_resize"
+                    }
+                )
+
+            end
+        end
     end
 
     --------------------------------------------------
-    -- Let applications process queued events.
+    -- Run application events.
     --------------------------------------------------
 
     resumeApps()
 
     --------------------------------------------------
-    -- Remove crashed/finished applications.
+    -- Remove dead apps.
     --------------------------------------------------
 
-    cleanupApps()
+    cleanup()
 end
