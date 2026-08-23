@@ -1,5 +1,18 @@
 -- NexusOS Files
 -- Graphical file manager
+--
+-- Defensive version:
+-- * Never trusts term.getSize() to return valid numbers
+-- * Never passes nil coordinates to terminal functions
+-- * Does not require shell.dir() to start
+-- * Handles tiny application windows
+-- * Supports keyboard navigation
+-- * Supports mouse selection / double click
+-- * Supports directories and basic file viewing
+
+--------------------------------------------------
+-- Terminal setup
+--------------------------------------------------
 
 term.setBackgroundColor(colors.black)
 term.setTextColor(colors.white)
@@ -9,131 +22,169 @@ term.setCursorBlink(false)
 -- State
 --------------------------------------------------
 
-local currentPath = shell.dir()
-
-if currentPath == "" then
-    currentPath = "/"
-else
-    currentPath = "/" .. currentPath
-end
-
+local currentPath = "/"
 local selected = 1
 local scroll = 0
-
 local entries = {}
 
 local lastClickTime = 0
 local lastClickIndex = nil
 
 --------------------------------------------------
--- Safe size
+-- Safe terminal size
 --------------------------------------------------
 
-local function size()
+local function getSize()
+    local w, h = term.getSize()
 
-    local w, h =
-        term.getSize()
+    w = tonumber(w)
+    h = tonumber(h)
 
-    w = tonumber(w) or 1
-    h = tonumber(h) or 1
+    if not w or w < 1 then
+        w = 1
+    end
 
-    return math.max(1, w),
-           math.max(1, h)
+    if not h or h < 1 then
+        h = 1
+    end
+
+    return math.floor(w), math.floor(h)
 end
 
 --------------------------------------------------
--- Safe cursor
+-- Safe number
+--------------------------------------------------
+
+local function number(value, fallback)
+    value = tonumber(value)
+
+    if not value then
+        return fallback or 1
+    end
+
+    return math.floor(value)
+end
+
+--------------------------------------------------
+-- Safe cursor position
 --------------------------------------------------
 
 local function cursor(x, y)
+    local width, height = getSize()
 
-    local w, h =
-        size()
+    x = number(x, 1)
+    y = number(y, 1)
 
-    x = math.floor(
-        tonumber(x) or 1
-    )
+    if x < 1 then
+        x = 1
+    elseif x > width then
+        x = width
+    end
 
-    y = math.floor(
-        tonumber(y) or 1
-    )
-
-    x = math.max(
-        1,
-        math.min(w, x)
-    )
-
-    y = math.max(
-        1,
-        math.min(h, y)
-    )
+    if y < 1 then
+        y = 1
+    elseif y > height then
+        y = height
+    end
 
     term.setCursorPos(x, y)
 end
 
 --------------------------------------------------
--- Normalize
+-- Safe text
 --------------------------------------------------
 
-local function normalize(path)
+local function writeAt(x, y, text)
+    local width = getSize()
+
+    cursor(x, y)
+
+    text = tostring(text or "")
+
+    if #text > width - x + 1 then
+        text = text:sub(1, math.max(0, width - x + 1))
+    end
+
+    if #text > 0 then
+        term.write(text)
+    end
+end
+
+--------------------------------------------------
+-- Normalize path
+--------------------------------------------------
+
+local function normalizePath(path)
 
     if not path or path == "" then
         return "/"
     end
 
-    local resolved =
-        shell.resolve(path)
+    path = tostring(path)
 
-    if not resolved or resolved == "" then
+    -- Convert backslashes just in case.
+    path = path:gsub("\\", "/")
+
+    -- Make absolute.
+    if path:sub(1, 1) ~= "/" then
+        path = "/" .. path
+    end
+
+    -- Resolve ., .. manually.
+    local parts = {}
+
+    for part in path:gmatch("[^/]+") do
+
+        if part == ".." then
+
+            if #parts > 0 then
+                table.remove(parts)
+            end
+
+        elseif part ~= "." and part ~= "" then
+            table.insert(parts, part)
+        end
+    end
+
+    if #parts == 0 then
         return "/"
     end
 
-    if resolved:sub(1, 1) ~= "/" then
-        resolved = "/" .. resolved
-    end
-
-    return resolved
+    return "/" .. table.concat(parts, "/")
 end
 
 --------------------------------------------------
--- Parent
+-- Parent directory
 --------------------------------------------------
 
-local function parent(path)
+local function getParent(path)
 
-    path =
-        normalize(path)
+    path = normalizePath(path)
 
     if path == "/" then
         return "/"
     end
 
-    local p =
-        fs.getDir(path)
+    local parent = fs.getDir(path)
 
-    if not p or p == "" then
+    if not parent or parent == "" then
         return "/"
     end
 
-    if p:sub(1, 1) ~= "/" then
-        p = "/" .. p
-    end
-
-    return p
+    return normalizePath(parent)
 end
 
 --------------------------------------------------
 -- List height
 --------------------------------------------------
 
-local function listHeight()
+local function getListHeight()
 
-    local _, h =
-        size()
+    local _, height = getSize()
 
     return math.max(
         1,
-        h - 4
+        height - 4
     )
 end
 
@@ -143,8 +194,7 @@ end
 
 local function changeDirectory(path)
 
-    path =
-        normalize(path)
+    path = normalizePath(path)
 
     if not fs.exists(path) then
         return false
@@ -156,8 +206,6 @@ local function changeDirectory(path)
 
     currentPath = path
 
-    shell.setDir(path)
-
     selected = 1
     scroll = 0
 
@@ -165,7 +213,7 @@ local function changeDirectory(path)
 end
 
 --------------------------------------------------
--- Load
+-- Load directory
 --------------------------------------------------
 
 local function loadDirectory()
@@ -173,7 +221,7 @@ local function loadDirectory()
     entries = {}
 
     --------------------------------------------------
-    -- Parent entry
+    -- Parent
     --------------------------------------------------
 
     if currentPath ~= "/" then
@@ -182,7 +230,7 @@ local function loadDirectory()
             entries,
             {
                 name = "..",
-                path = parent(currentPath),
+                path = getParent(currentPath),
                 directory = true,
                 parent = true
             }
@@ -193,37 +241,62 @@ local function loadDirectory()
     -- Contents
     --------------------------------------------------
 
-    local list =
-        fs.list(currentPath)
+    local ok, list = pcall(
+        fs.list,
+        currentPath
+    )
+
+    if not ok or type(list) ~= "table" then
+        list = {}
+    end
+
+    --------------------------------------------------
+    -- Sort
+    --------------------------------------------------
 
     table.sort(
         list,
         function(a, b)
 
-            local ap =
-                fs.isDir(
-                    fs.combine(
-                        currentPath,
-                        a
-                    )
+            local pathA =
+                fs.combine(
+                    currentPath,
+                    a
                 )
 
-            local bp =
-                fs.isDir(
-                    fs.combine(
-                        currentPath,
-                        b
-                    )
+            local pathB =
+                fs.combine(
+                    currentPath,
+                    b
                 )
 
-            if ap ~= bp then
-                return ap
+            local dirA = false
+            local dirB = false
+
+            pcall(
+                function()
+                    dirA = fs.isDir(pathA)
+                end
+            )
+
+            pcall(
+                function()
+                    dirB = fs.isDir(pathB)
+                end
+            )
+
+            if dirA ~= dirB then
+                return dirA
             end
 
-            return a:lower()
-                < b:lower()
+            return tostring(a):lower()
+                < tostring(b):lower()
         end
     )
+
+    --------------------------------------------------
+    -- Create entries
+    --------------------------------------------------
 
     for _, name in ipairs(list) do
 
@@ -233,17 +306,29 @@ local function loadDirectory()
                 name
             )
 
+        local directory = false
+
+        pcall(
+            function()
+                directory = fs.isDir(path)
+            end
+        )
+
         table.insert(
             entries,
             {
-                name = name,
+                name = tostring(name),
                 path = path,
-                directory = fs.isDir(path),
+                directory = directory,
                 parent = false
             }
         )
     end
 
+    --------------------------------------------------
+    -- Fix selection
+    --------------------------------------------------
+
     if #entries == 0 then
 
         selected = 1
@@ -252,79 +337,99 @@ local function loadDirectory()
         return
     end
 
-    selected =
-        math.max(
-            1,
-            math.min(
-                selected,
-                #entries
-            )
+    selected = math.max(
+        1,
+        math.min(
+            selected,
+            #entries
         )
+    )
+
+    --------------------------------------------------
+    -- Fix scroll
+    --------------------------------------------------
+
+    local listHeight =
+        getListHeight()
 
     local maxScroll =
         math.max(
             0,
-            #entries - listHeight()
+            #entries - listHeight
         )
 
-    scroll =
-        math.max(
-            0,
-            math.min(
-                scroll,
-                maxScroll
-            )
+    scroll = math.max(
+        0,
+        math.min(
+            scroll,
+            maxScroll
         )
+    )
 end
 
 --------------------------------------------------
--- Keep selected visible
+-- Keep selection visible
 --------------------------------------------------
 
-local function ensureVisible()
+local function ensureSelectedVisible()
 
     if #entries == 0 then
-
         selected = 1
         scroll = 0
-
         return
     end
 
-    selected =
-        math.max(
-            1,
-            math.min(
-                selected,
-                #entries
-            )
+    selected = math.max(
+        1,
+        math.min(
+            selected,
+            #entries
         )
+    )
 
     local height =
-        listHeight()
+        getListHeight()
 
     if selected <= scroll then
-
-        scroll =
-            selected - 1
-
-    elseif selected > scroll + height then
-
-        scroll =
-            selected - height
+        scroll = selected - 1
     end
 
-    scroll =
-        math.max(
-            0,
-            math.min(
-                scroll,
-                math.max(
-                    0,
-                    #entries - height
-                )
+    if selected > scroll + height then
+        scroll = selected - height
+    end
+
+    scroll = math.max(
+        0,
+        math.min(
+            scroll,
+            math.max(
+                0,
+                #entries - height
             )
         )
+    )
+end
+
+--------------------------------------------------
+-- Clear line
+--------------------------------------------------
+
+local function clearLine(y, color)
+
+    local width = getSize()
+
+    cursor(1, y)
+
+    term.setBackgroundColor(
+        color or colors.black
+    )
+
+    term.write(
+        string.rep(
+            " ",
+            width
+        )
+    )
 end
 
 --------------------------------------------------
@@ -333,19 +438,19 @@ end
 
 local function drawHeader()
 
-    local width, height =
-        size()
+    local width = getSize()
 
-    term.setBackgroundColor(colors.gray)
-    term.setTextColor(colors.white)
+    term.setBackgroundColor(
+        colors.gray
+    )
 
-    cursor(1, 1)
+    term.setTextColor(
+        colors.white
+    )
 
-    term.write(
-        string.rep(
-            " ",
-            width
-        )
+    clearLine(
+        1,
+        colors.gray
     )
 
     --------------------------------------------------
@@ -366,8 +471,8 @@ local function drawHeader()
     -- Path
     --------------------------------------------------
 
-    local path =
-        currentPath
+    local pathText =
+        tostring(currentPath)
 
     local available =
         math.max(
@@ -375,23 +480,37 @@ local function drawHeader()
             width - 9
         )
 
-    if #path > available then
+    if #pathText > available then
 
-        path =
-            "..." ..
-            path:sub(
-                math.max(
+        if available <= 3 then
+
+            pathText =
+                pathText:sub(
                     1,
-                    #path - available + 4
+                    available
                 )
-            )
+
+        else
+
+            pathText =
+                "..." ..
+                pathText:sub(
+                    math.max(
+                        1,
+                        #pathText -
+                        available + 4
+                    )
+                )
+        end
     end
 
     cursor(5, 1)
 
-    term.setTextColor(colors.white)
+    term.setTextColor(
+        colors.white
+    )
 
-    term.write(path)
+    term.write(pathText)
 
     --------------------------------------------------
     -- Refresh
@@ -400,8 +519,15 @@ local function drawHeader()
     if width >= 5 then
 
         cursor(
-            width - 4,
+            math.max(
+                1,
+                width - 3
+            ),
             1
+        )
+
+        term.setTextColor(
+            colors.white
         )
 
         term.write("[R]")
@@ -415,28 +541,36 @@ end
 local function drawEntries()
 
     local width, height =
-        size()
+        getSize()
 
     local visible =
-        listHeight()
+        getListHeight()
 
     --------------------------------------------------
-    -- Clear content
+    -- Clear content area
     --------------------------------------------------
 
-    term.setBackgroundColor(colors.black)
-    term.setTextColor(colors.white)
+    term.setBackgroundColor(
+        colors.black
+    )
 
-    for y = 2, height - 1 do
+    term.setTextColor(
+        colors.white
+    )
 
-        cursor(1, y)
+    if height >= 2 then
 
-        term.write(
-            string.rep(
-                " ",
-                width
+        for y = 2, height - 1 do
+
+            cursor(1, y)
+
+            term.write(
+                string.rep(
+                    " ",
+                    width
+                )
             )
-        )
+        end
     end
 
     --------------------------------------------------
@@ -457,6 +591,10 @@ local function drawEntries()
 
         local y =
             row + 1
+
+        --------------------------------------------------
+        -- Selection
+        --------------------------------------------------
 
         if index == selected then
 
@@ -488,6 +626,10 @@ local function drawEntries()
             end
         end
 
+        --------------------------------------------------
+        -- Full row
+        --------------------------------------------------
+
         cursor(1, y)
 
         term.write(
@@ -497,6 +639,10 @@ local function drawEntries()
             )
         )
 
+        --------------------------------------------------
+        -- Icon
+        --------------------------------------------------
+
         cursor(2, y)
 
         if entry.directory then
@@ -505,8 +651,12 @@ local function drawEntries()
             term.write("[FILE]")
         end
 
+        --------------------------------------------------
+        -- Name
+        --------------------------------------------------
+
         local name =
-            entry.name
+            tostring(entry.name or "")
 
         local maxName =
             math.max(
@@ -542,27 +692,35 @@ local function drawEntries()
 end
 
 --------------------------------------------------
--- Footer
+-- Draw footer
 --------------------------------------------------
 
 local function drawFooter()
 
     local width, height =
-        size()
+        getSize()
 
-    term.setBackgroundColor(colors.gray)
-    term.setTextColor(colors.white)
+    if height < 1 then
+        return
+    end
 
-    cursor(1, height)
-
-    term.write(
-        string.rep(
-            " ",
-            width
-        )
+    term.setBackgroundColor(
+        colors.gray
     )
 
-    cursor(2, height)
+    term.setTextColor(
+        colors.white
+    )
+
+    clearLine(
+        height,
+        colors.gray
+    )
+
+    cursor(
+        2,
+        height
+    )
 
     term.write(
         tostring(#entries)
@@ -594,7 +752,48 @@ local function draw()
 end
 
 --------------------------------------------------
--- Open
+-- Show error message
+--------------------------------------------------
+
+local function showMessage(message)
+
+    local width, height =
+        getSize()
+
+    term.setBackgroundColor(
+        colors.black
+    )
+
+    term.setTextColor(
+        colors.red
+    )
+
+    clearLine(
+        math.max(1, height - 1),
+        colors.black
+    )
+
+    cursor(
+        1,
+        math.max(1, height - 1)
+    )
+
+    local text =
+        tostring(message or "Error")
+
+    if #text > width then
+        text = text:sub(1, width)
+    end
+
+    term.write(text)
+
+    sleep(0.8)
+
+    draw()
+end
+
+--------------------------------------------------
+-- Open selected
 --------------------------------------------------
 
 local function openSelected()
@@ -616,6 +815,10 @@ local function openSelected()
         return
     end
 
+    --------------------------------------------------
+    -- Directory
+    --------------------------------------------------
+
     if entry.directory then
 
         if changeDirectory(
@@ -630,85 +833,151 @@ local function openSelected()
     end
 
     --------------------------------------------------
-    -- Basic file viewer.
+    -- File viewer
     --------------------------------------------------
 
-    local file =
-        fs.open(
+    local ok, file =
+        pcall(
+            fs.open,
             entry.path,
             "r"
         )
 
-    if not file then
+    if not ok or not file then
 
-        print(
+        showMessage(
             "Unable to open "
-            .. entry.name
+            .. tostring(entry.name)
         )
-
-        sleep(1)
-
-        draw()
 
         return
     end
 
-    local content =
-        file.readAll()
+    local okRead, content =
+        pcall(
+            function()
+                return file.readAll()
+            end
+        )
 
-    file.close()
-
-    term.clear()
-    cursor(1, 1)
-
-    term.setTextColor(colors.yellow)
-
-    print(
-        "File: "
-        .. entry.name
+    pcall(
+        function()
+            file.close()
+        end
     )
 
-    term.setTextColor(colors.white)
+    if not okRead then
 
-    print("")
+        showMessage(
+            "Unable to read "
+            .. tostring(entry.name)
+        )
+
+        return
+    end
+
+    content =
+        tostring(content or "")
+
+    --------------------------------------------------
+    -- Viewer
+    --------------------------------------------------
 
     local width, height =
-        size()
+        getSize()
 
-    local line = 3
+    term.setBackgroundColor(
+        colors.black
+    )
+
+    term.setTextColor(
+        colors.white
+    )
+
+    term.clear()
+
+    cursor(1, 1)
+
+    term.setTextColor(
+        colors.yellow
+    )
+
+    local title =
+        "File: "
+        .. tostring(entry.name)
+
+    if #title > width then
+        title = title:sub(1, width)
+    end
+
+    term.write(title)
+
+    term.setTextColor(
+        colors.white
+    )
+
+    local lineNumber = 3
 
     for textLine in (
         content .. "\n"
     ):gmatch("(.-)\n") do
 
-        if line >= height then
+        if lineNumber >= height then
             break
         end
 
-        cursor(1, line)
-
-        term.write(
-            textLine:sub(
-                1,
-                width
-            )
+        cursor(
+            1,
+            lineNumber
         )
 
-        line = line + 1
+        local line =
+            tostring(textLine)
+
+        if #line > width then
+            line =
+                line:sub(
+                    1,
+                    width
+                )
+        end
+
+        term.write(line)
+
+        lineNumber =
+            lineNumber + 1
     end
 
-    cursor(
-        1,
-        height
+    --------------------------------------------------
+    -- Return message
+    --------------------------------------------------
+
+    if height >= 1 then
+
+        cursor(
+            1,
+            height
+        )
+
+        term.setTextColor(
+            colors.gray
+        )
+
+        local message =
+            "Press any key to return"
+
+        if #message <= width then
+            term.write(message)
+        end
+    end
+
+    term.setTextColor(
+        colors.white
     )
 
-    term.setTextColor(colors.gray)
-
-    term.write(
-        "Press any key to return"
-    )
-
-    term.setTextColor(colors.white)
+    --------------------------------------------------
+    -- Wait
+    --------------------------------------------------
 
     os.pullEvent("key")
 
@@ -716,20 +985,20 @@ local function openSelected()
 end
 
 --------------------------------------------------
--- Mouse
+-- Mouse click
 --------------------------------------------------
 
-local function mouseClick(
+local function handleMouse(
     button,
     x,
     y
 )
 
     local width, height =
-        size()
+        getSize()
 
-    x = tonumber(x) or 0
-    y = tonumber(y) or 0
+    x = number(x, 0)
+    y = number(y, 0)
 
     --------------------------------------------------
     -- Back
@@ -743,7 +1012,7 @@ local function mouseClick(
         if currentPath ~= "/" then
 
             changeDirectory(
-                parent(currentPath)
+                getParent(currentPath)
             )
 
             loadDirectory()
@@ -758,7 +1027,8 @@ local function mouseClick(
     --------------------------------------------------
 
     if y == 1
-        and x >= width - 4
+        and width >= 5
+        and x >= math.max(1, width - 4)
         and x <= width
     then
 
@@ -788,6 +1058,10 @@ local function mouseClick(
             return
         end
 
+        --------------------------------------------------
+        -- Double click
+        --------------------------------------------------
+
         if selected == index then
 
             local now =
@@ -797,10 +1071,10 @@ local function mouseClick(
                 and now - lastClickTime < 500
             then
 
-                openSelected()
-
                 lastClickIndex = nil
                 lastClickTime = 0
+
+                openSelected()
 
                 return
             end
@@ -826,45 +1100,75 @@ end
 -- Keyboard
 --------------------------------------------------
 
-local function key(key)
+local function handleKey(key)
+
+    if not key then
+        return
+    end
+
+    --------------------------------------------------
+    -- Up
+    --------------------------------------------------
 
     if key == keys.up then
 
-        selected =
-            math.max(
-                1,
-                selected - 1
-            )
+        if #entries > 0 then
 
-        ensureVisible()
-        draw()
+            selected =
+                math.max(
+                    1,
+                    selected - 1
+                )
+
+            ensureSelectedVisible()
+            draw()
+        end
+
+    --------------------------------------------------
+    -- Down
+    --------------------------------------------------
 
     elseif key == keys.down then
 
-        selected =
-            math.min(
-                #entries,
-                selected + 1
-            )
+        if #entries > 0 then
 
-        ensureVisible()
-        draw()
+            selected =
+                math.min(
+                    #entries,
+                    selected + 1
+                )
+
+            ensureSelectedVisible()
+            draw()
+        end
+
+    --------------------------------------------------
+    -- Enter
+    --------------------------------------------------
 
     elseif key == keys.enter then
 
         openSelected()
+
+    --------------------------------------------------
+    -- Backspace
+    --------------------------------------------------
 
     elseif key == keys.backspace then
 
         if currentPath ~= "/" then
 
             changeDirectory(
-                parent(currentPath)
+                getParent(currentPath)
             )
 
             loadDirectory()
             draw()
         end
+
+    --------------------------------------------------
+    -- Home
+    --------------------------------------------------
 
     elseif key == keys.home then
 
@@ -873,6 +1177,10 @@ local function key(key)
 
         draw()
 
+    --------------------------------------------------
+    -- End
+    --------------------------------------------------
+
     elseif key == keys["end"] then
 
         if #entries > 0 then
@@ -880,9 +1188,13 @@ local function key(key)
             selected =
                 #entries
 
-            ensureVisible()
+            ensureSelectedVisible()
             draw()
         end
+
+    --------------------------------------------------
+    -- R
+    --------------------------------------------------
 
     elseif key == keys.r then
 
@@ -895,10 +1207,18 @@ end
 -- Initialize
 --------------------------------------------------
 
-changeDirectory(currentPath)
+-- Always start at root.
+--
+-- We intentionally do NOT call shell.dir()
+-- here. The application should still start even
+-- if the kernel's application environment does
+-- not provide shell.
+
+currentPath = "/"
+
+changeDirectory("/")
 
 loadDirectory()
-
 draw()
 
 --------------------------------------------------
@@ -912,21 +1232,39 @@ while true do
             os.pullEvent()
         )
 
-    if event[1] == "mouse_click" then
+    local eventName =
+        event[1]
 
-        mouseClick(
+    --------------------------------------------------
+    -- Mouse
+    --------------------------------------------------
+
+    if eventName == "mouse_click" then
+
+        handleMouse(
             event[2],
             event[3],
             event[4]
         )
 
-    elseif event[1] == "key" then
+    --------------------------------------------------
+    -- Keyboard
+    --------------------------------------------------
 
-        key(event[2])
+    elseif eventName == "key" then
 
-    elseif event[1] == "term_resize" then
+        handleKey(
+            event[2]
+        )
+
+    --------------------------------------------------
+    -- Terminal resize
+    --------------------------------------------------
+
+    elseif eventName == "term_resize" then
 
         loadDirectory()
+        ensureSelectedVisible()
         draw()
     end
 end
