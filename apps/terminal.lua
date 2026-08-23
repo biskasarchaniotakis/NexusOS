@@ -3,23 +3,23 @@
 term.setCursorBlink(true)
 
 --------------------------------------------------
--- Ensure NexusOS apps are always executable
+-- Add NexusOS apps to the existing shell path
 --------------------------------------------------
 
 do
-    local currentPath = shell.path()
+    local path = shell.path()
 
-    local appsInPath = false
+    local hasApps = false
 
-    for path in currentPath:gmatch("[^:]+") do
-        if path == "/apps" then
-            appsInPath = true
+    for entry in path:gmatch("[^:]+") do
+        if entry == "/apps" then
+            hasApps = true
             break
         end
     end
 
-    if not appsInPath then
-        shell.setPath(currentPath .. ":/apps")
+    if not hasApps then
+        shell.setPath(path .. ":/apps")
     end
 end
 
