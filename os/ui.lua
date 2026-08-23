@@ -751,44 +751,28 @@ end
 
 function UI.draw()
 
-    --------------------------------------------------
-    -- IMPORTANT RENDER ORDER
-    --
-    -- 1. Desktop
-    -- 2. Application terminal buffers
-    -- 3. Window chrome
-    -- 4. Taskbar
-    -- 5. Start menu
-    --
-    -- window.create() terminals are separate terminal
-    -- objects, so their contents are preserved.
-    --------------------------------------------------
-
     UI.drawDesktop()
 
     --------------------------------------------------
-    -- Make visible application terminals visible.
-    --
-    -- The terminal objects themselves render their
-    -- buffered contents onto the native terminal.
+    -- Draw windows
     --------------------------------------------------
 
     for _, win in ipairs(UI.windows) do
 
         if win.visible
-            and not win.minimized
-            and win.terminal then
+            and not win.minimized then
 
-            win.terminal.setVisible(true)
+            UI.drawWindow(win)
+
+            --------------------------------------------------
+            -- Make sure application terminal is visible
+            -- at its current window position.
+            --------------------------------------------------
+
+            if win.terminal then
+                win.terminal.setVisible(true)
+            end
         end
-    end
-
-    --------------------------------------------------
-    -- Draw chrome ON TOP of application terminals.
-    --------------------------------------------------
-
-    for _, win in ipairs(UI.windows) do
-        UI.drawWindow(win)
     end
 
     UI.drawTaskbar()
@@ -797,6 +781,7 @@ function UI.draw()
         UI.drawStartMenu()
     end
 end
+
 
 --------------------------------------------------
 -- Remove window
@@ -960,11 +945,11 @@ end
 -- Start dragging
 --------------------------------------------------
 
-function UI.startDrag(
-    win,
-    mouseX,
-    mouseY
-)
+function UI.startDrag(win, mouseX, mouseY)
+
+    if not win then
+        return
+    end
 
     UI.activeMode = "drag"
     UI.activeWindow = win
@@ -972,11 +957,19 @@ function UI.startDrag(
     win.dragging = true
     win.resizing = false
 
+    --------------------------------------------------
+    -- Remember where inside the title bar we clicked.
+    --------------------------------------------------
+
     win.dragX =
         mouseX - win.x
 
     win.dragY =
         mouseY - win.y
+
+    --------------------------------------------------
+    -- Bring window to front.
+    --------------------------------------------------
 
     UI.focus(win)
 end
@@ -985,63 +978,84 @@ end
 -- Drag window
 --------------------------------------------------
 
-function UI.drag(
-    win,
-    mouseX,
-    mouseY
-)
+function UI.drag(win, mouseX, mouseY)
 
-    if not win
-        or not win.dragging then
-
+    if not win or not win.dragging then
         return
     end
 
     local t = screen()
 
-    local width, height =
+    local screenWidth, screenHeight =
         t.getSize()
 
-    win.x =
+    --------------------------------------------------
+    -- Calculate new position
+    --------------------------------------------------
+
+    local newX =
         mouseX - win.dragX
 
-    win.y =
+    local newY =
         mouseY - win.dragY
 
-    if win.x < 1 then
-        win.x = 1
+    --------------------------------------------------
+    -- Keep inside screen
+    --------------------------------------------------
+
+    newX =
+        math.max(
+            1,
+            newX
+        )
+
+    newY =
+        math.max(
+            1,
+            newY
+        )
+
+    if newX + win.width - 1 > screenWidth then
+
+        newX =
+            screenWidth - win.width + 1
     end
 
-    if win.y < 1 then
-        win.y = 1
+    if newY + win.height > screenHeight then
+
+        newY =
+            screenHeight - win.height
     end
 
-    if win.x + win.width - 1 >
-        width then
+    --------------------------------------------------
+    -- Save position
+    --------------------------------------------------
 
-        win.x =
-            width - win.width + 1
-    end
+    win.x = newX
+    win.y = newY
 
-    if win.y + win.height >
-        height then
-
-        win.y =
-            height - win.height
-    end
+    --------------------------------------------------
+    -- Move application terminal
+    --------------------------------------------------
 
     if win.terminal then
 
         win.terminal.reposition(
             win.x + 1,
             win.y + 2,
-            math.max(1, win.width - 2),
-            math.max(1, win.height - 3)
+            win.width - 2,
+            win.height - 3
         )
+
     end
+
+    --------------------------------------------------
+    -- Redraw desktop and windows
+    --------------------------------------------------
 
     UI.draw()
 end
+
 
 --------------------------------------------------
 -- Start resizing
