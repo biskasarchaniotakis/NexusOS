@@ -145,8 +145,8 @@ function UI.createWindow(
             t,
             x + 1,
             y + 2,
-            width - 2,
-            height - 3,
+            math.max(1, width - 2),
+            math.max(1, height - 3),
             true
         )
 
@@ -261,13 +261,6 @@ function UI.restoreWindow(win)
         return
     end
 
-    --------------------------------------------------
-    -- This is intentionally explicit.
-    --
-    -- Do NOT rely on focus() alone to restore a
-    -- minimized application.
-    --------------------------------------------------
-
     win.visible = true
     win.minimized = false
     win.dragging = false
@@ -327,6 +320,16 @@ function UI.drawDesktop()
         colors.white
     )
 
+    --------------------------------------------------
+    -- IMPORTANT:
+    --
+    -- The desktop is drawn BEFORE application
+    -- terminals are shown.
+    --
+    -- This prevents us from repeatedly clearing
+    -- application window buffers.
+    --------------------------------------------------
+
     t.clear()
 
     for y = 1, height - 1 do
@@ -346,7 +349,7 @@ function UI.drawDesktop()
 end
 
 --------------------------------------------------
--- Draw window
+-- Draw window chrome
 --------------------------------------------------
 
 function UI.drawWindow(win)
@@ -358,6 +361,15 @@ function UI.drawWindow(win)
     end
 
     local t = screen()
+
+    --------------------------------------------------
+    -- IMPORTANT:
+    --
+    -- We ONLY draw the window chrome here.
+    --
+    -- We do NOT clear or draw over the application
+    -- terminal area.
+    --------------------------------------------------
 
     --------------------------------------------------
     -- Title bar
@@ -454,7 +466,7 @@ function UI.drawWindow(win)
     t.write("X")
 
     --------------------------------------------------
-    -- Border
+    -- Separator
     --------------------------------------------------
 
     t.setBackgroundColor(
@@ -464,10 +476,6 @@ function UI.drawWindow(win)
     t.setTextColor(
         colors.white
     )
-
-    --------------------------------------------------
-    -- Separator
-    --------------------------------------------------
 
     t.setCursorPos(
         win.x,
@@ -482,7 +490,7 @@ function UI.drawWindow(win)
     )
 
     --------------------------------------------------
-    -- Sides
+    -- Window sides
     --------------------------------------------------
 
     for y =
@@ -552,12 +560,12 @@ function UI.drawTaskbar()
     local width, height =
         t.getSize()
 
-    --------------------------------------------------
-    -- Background
-    --------------------------------------------------
-
     t.setBackgroundColor(
         UI.taskbarColor
+    )
+
+    t.setTextColor(
+        colors.white
     )
 
     t.setCursorPos(
@@ -597,16 +605,13 @@ function UI.drawTaskbar()
 
     for _, win in ipairs(UI.windows) do
 
-        if win.visible then
+        if win.visible
+            or win.minimized then
 
             local label =
                 "[ " .. win.title .. " ]"
 
             if x + #label <= width then
-
-                --------------------------------------------------
-                -- Active window
-                --------------------------------------------------
 
                 if win.focused
                     and not win.minimized then
@@ -614,10 +619,6 @@ function UI.drawTaskbar()
                     t.setBackgroundColor(
                         colors.lightBlue
                     )
-
-                --------------------------------------------------
-                -- Minimized window
-                --------------------------------------------------
 
                 elseif win.minimized then
 
@@ -750,7 +751,41 @@ end
 
 function UI.draw()
 
+    --------------------------------------------------
+    -- IMPORTANT RENDER ORDER
+    --
+    -- 1. Desktop
+    -- 2. Application terminal buffers
+    -- 3. Window chrome
+    -- 4. Taskbar
+    -- 5. Start menu
+    --
+    -- window.create() terminals are separate terminal
+    -- objects, so their contents are preserved.
+    --------------------------------------------------
+
     UI.drawDesktop()
+
+    --------------------------------------------------
+    -- Make visible application terminals visible.
+    --
+    -- The terminal objects themselves render their
+    -- buffered contents onto the native terminal.
+    --------------------------------------------------
+
+    for _, win in ipairs(UI.windows) do
+
+        if win.visible
+            and not win.minimized
+            and win.terminal then
+
+            win.terminal.setVisible(true)
+        end
+    end
+
+    --------------------------------------------------
+    -- Draw chrome ON TOP of application terminals.
+    --------------------------------------------------
 
     for _, win in ipairs(UI.windows) do
         UI.drawWindow(win)
@@ -833,23 +868,12 @@ function UI.minimize(win)
         return
     end
 
-    --------------------------------------------------
-    -- Explicitly mark minimized.
-    --------------------------------------------------
-
     win.minimized = true
     win.visible = true
     win.focused = false
 
     win.dragging = false
     win.resizing = false
-
-    --------------------------------------------------
-    -- Hide application terminal.
-    --
-    -- IMPORTANT:
-    -- The terminal still exists. We only hide it.
-    --------------------------------------------------
 
     if win.terminal then
 
@@ -863,7 +887,7 @@ function UI.minimize(win)
     end
 
     --------------------------------------------------
-    -- Find another visible, non-minimized window.
+    -- Find another visible window.
     --------------------------------------------------
 
     for i =
@@ -884,17 +908,11 @@ function UI.minimize(win)
         end
     end
 
-    --------------------------------------------------
-    -- No other window.
-    --------------------------------------------------
-
     UI.draw()
 end
 
 --------------------------------------------------
 -- Find taskbar application
---
--- This deliberately includes minimized windows.
 --------------------------------------------------
 
 function UI.getTaskbarWindowAt(
@@ -914,15 +932,6 @@ function UI.getTaskbarWindowAt(
     local currentX = 15
 
     for _, win in ipairs(UI.windows) do
-
-        --------------------------------------------------
-        -- IMPORTANT:
-        --
-        -- Check visible OR minimized.
-        --
-        -- A minimized window must remain represented
-        -- on the taskbar.
-        --------------------------------------------------
 
         if win.visible
             or win.minimized then
@@ -1026,8 +1035,8 @@ function UI.drag(
         win.terminal.reposition(
             win.x + 1,
             win.y + 2,
-            win.width - 2,
-            win.height - 3
+            math.max(1, win.width - 2),
+            math.max(1, win.height - 3)
         )
     end
 
@@ -1117,8 +1126,8 @@ function UI.resize(
         win.terminal.reposition(
             win.x + 1,
             win.y + 2,
-            win.width - 2,
-            win.height - 3
+            math.max(1, win.width - 2),
+            math.max(1, win.height - 3)
         )
     end
 
@@ -1183,8 +1192,6 @@ function UI.mouseClick(
 
     --------------------------------------------------
     -- TASKBAR
-    --
-    -- MUST be checked before getWindowAt().
     --------------------------------------------------
 
     if y == height then
@@ -1197,12 +1204,6 @@ function UI.mouseClick(
 
         if taskWindow then
 
-            --------------------------------------------------
-            -- MINIMIZED WINDOW
-            --
-            -- Explicit restore.
-            --------------------------------------------------
-
             if taskWindow.minimized then
 
                 UI.restoreWindow(
@@ -1211,10 +1212,6 @@ function UI.mouseClick(
 
                 return true
             end
-
-            --------------------------------------------------
-            -- Normal window.
-            --------------------------------------------------
 
             if UI.focused ~= taskWindow then
 
@@ -1247,10 +1244,7 @@ function UI.mouseClick(
             UI.startMenu = false
 
             if UI.onLaunch then
-
-                UI.onLaunch(
-                    "terminal"
-                )
+                UI.onLaunch("terminal")
             end
 
             UI.draw()
@@ -1265,10 +1259,7 @@ function UI.mouseClick(
             UI.startMenu = false
 
             if UI.onLaunch then
-
-                UI.onLaunch(
-                    "files"
-                )
+                UI.onLaunch("files")
             end
 
             UI.draw()
@@ -1283,10 +1274,7 @@ function UI.mouseClick(
             UI.startMenu = false
 
             if UI.onLaunch then
-
-                UI.onLaunch(
-                    "settings"
-                )
+                UI.onLaunch("settings")
             end
 
             UI.draw()
@@ -1319,12 +1307,6 @@ function UI.mouseClick(
     end
 
     --------------------------------------------------
-    -- Focus window.
-    --------------------------------------------------
-
-    UI.focus(win)
-
-    --------------------------------------------------
     -- CLOSE
     --------------------------------------------------
 
@@ -1332,13 +1314,9 @@ function UI.mouseClick(
         and x == win.x + win.width - 2 then
 
         if UI.onClose then
-
             UI.onClose(win)
-
         else
-
             UI.removeWindow(win)
-
         end
 
         return true
@@ -1386,9 +1364,9 @@ function UI.mouseClick(
 
     --------------------------------------------------
     -- CONTENT
-    --
-    -- Kernel can send this to the application.
     --------------------------------------------------
+
+    UI.focus(win)
 
     return false
 end
