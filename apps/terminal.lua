@@ -1,5 +1,28 @@
 -- NexusOS Terminal
+
 term.setCursorBlink(true)
+
+--------------------------------------------------
+-- Ensure NexusOS apps are always executable
+--------------------------------------------------
+
+do
+    local currentPath = shell.path()
+
+    local appsInPath = false
+
+    for path in currentPath:gmatch("[^:]+") do
+        if path == "/apps" then
+            appsInPath = true
+            break
+        end
+    end
+
+    if not appsInPath then
+        shell.setPath(currentPath .. ":/apps")
+    end
+end
+
 --------------------------------------------------
 -- History
 --------------------------------------------------
@@ -64,17 +87,13 @@ local function redraw(prompt, text, cursor)
     local _, y = term.getCursorPos()
     local width = term.getSize()
 
-    -- Move to start of input
     term.setCursorPos(#prompt + 1, y)
 
-    -- Clear the entire input area
     write(string.rep(" ", math.max(0, width - #prompt)))
 
-    -- Draw input
     term.setCursorPos(#prompt + 1, y)
     write(text)
 
-    -- Put cursor at correct position
     term.setCursorPos(
         #prompt + cursor + 1,
         y
@@ -106,7 +125,6 @@ local function getCompletions(text)
             end
         end
 
-        -- NexusOS built-in commands
         local builtins = {
             "cd",
             "clear",
@@ -202,14 +220,6 @@ local function applyCompletion(text, matches, index)
         return text
     end
 
-    -- Find the last slash in the argument.
-    --
-    -- /apps/ter
-    --        ^
-    --
-    -- prefix = /apps/
-    -- partial = ter
-
     local slash = lastArg:match("^.*()/")
 
     local prefix
@@ -223,7 +233,6 @@ local function applyCompletion(text, matches, index)
     local completed =
         prefix .. matches[index]
 
-    -- Replace ONLY the last argument.
     local beforeLast =
         text:sub(1, #text - #lastArg)
 
@@ -237,10 +246,6 @@ end
 local function showCompletions(prompt, text, cursor, matches)
     local _, y = term.getCursorPos()
 
-    --------------------------------------------------
-    -- Move below current line
-    --------------------------------------------------
-
     if y < term.getSize() then
         term.setCursorPos(1, y + 1)
     else
@@ -248,22 +253,10 @@ local function showCompletions(prompt, text, cursor, matches)
         term.setCursorPos(1, y)
     end
 
-    --------------------------------------------------
-    -- Print choices
-    --------------------------------------------------
-
     print(table.concat(matches, "    "))
-
-    --------------------------------------------------
-    -- New prompt
-    --------------------------------------------------
 
     write(prompt)
     write(text)
-
-    --------------------------------------------------
-    -- Cursor
-    --------------------------------------------------
 
     term.setCursorPos(
         #prompt + cursor + 1,
@@ -303,7 +296,6 @@ local function readCommand()
 
             cursor = cursor + 1
 
-            -- Reset completion
             completionMatches = {}
             completionIndex = 0
 
@@ -391,10 +383,6 @@ local function readCommand()
 
             elseif value == keys.tab then
 
-                --------------------------------------------------
-                -- Find matches
-                --------------------------------------------------
-
                 if #completionMatches == 0 then
 
                     completionMatches =
@@ -402,17 +390,9 @@ local function readCommand()
 
                     completionIndex = 1
 
-                    --------------------------------------------------
-                    -- No matches
-                    --------------------------------------------------
-
                     if #completionMatches == 0 then
 
                         -- Nothing to autocomplete.
-
-                    --------------------------------------------------
-                    -- One match
-                    --------------------------------------------------
 
                     elseif #completionMatches == 1 then
 
@@ -431,10 +411,6 @@ local function readCommand()
                             cursor
                         )
 
-                    --------------------------------------------------
-                    -- Multiple matches
-                    --------------------------------------------------
-
                     else
 
                         showCompletions(
@@ -444,10 +420,6 @@ local function readCommand()
                             completionMatches
                         )
                     end
-
-                --------------------------------------------------
-                -- Cycle matches
-                --------------------------------------------------
 
                 else
 
@@ -656,10 +628,8 @@ while true do
 
         else
 
-            -- Remove command name.
             table.remove(args, 1)
 
-            -- Run with arguments.
             shell.run(
                 program,
                 table.unpack(args)
