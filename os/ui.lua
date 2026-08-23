@@ -1,5 +1,14 @@
 -- NexusOS UI
--- Window manager + app launcher + resizing + minimization
+-- Stable window manager
+--
+-- IMPORTANT:
+-- Each application gets ONE buffered window.
+-- The UI draws the window chrome INTO that buffer.
+-- The application gets a child terminal inside it.
+--
+-- This avoids the old:
+--   native screen -> chrome -> terminal -> clear -> blue box
+-- problem.
 
 local UI = {}
 
@@ -9,7 +18,9 @@ local UI = {}
 
 UI.windows = {}
 UI.nextID = 1
+
 UI.focused = nil
+
 UI.startMenu = false
 
 UI.activeMode = nil
@@ -29,8 +40,8 @@ UI.closeColor = colors.red
 -- Window limits
 --------------------------------------------------
 
-UI.minWidth = 10
-UI.minHeight = 5
+UI.minWidth = 12
+UI.minHeight = 6
 
 --------------------------------------------------
 -- Screen
@@ -41,6 +52,42 @@ local function screen()
 end
 
 --------------------------------------------------
+-- Safe number
+--
+-- Prevents "bad argument #1 (number expected, got nil)"
+-- from propagating through window operations.
+--------------------------------------------------
+
+local function number(value, fallback)
+    if type(value) == "number" then
+        return value
+    end
+
+    return fallback
+end
+
+--------------------------------------------------
+-- Clamp
+--------------------------------------------------
+
+local function clamp(value, minimum, maximum)
+
+    if maximum < minimum then
+        return minimum
+    end
+
+    if value < minimum then
+        return minimum
+    end
+
+    if value > maximum then
+        return maximum
+    end
+
+    return value
+end
+
+--------------------------------------------------
 -- Initialize
 --------------------------------------------------
 
@@ -48,13 +95,78 @@ function UI.init()
 
     UI.windows = {}
     UI.nextID = 1
+
     UI.focused = nil
+
     UI.startMenu = false
 
     UI.activeMode = nil
     UI.activeWindow = nil
 
     UI.draw()
+end
+
+--------------------------------------------------
+-- Is window alive?
+--------------------------------------------------
+
+local function containsWindow(win)
+
+    if not win then
+        return false
+    end
+
+    for _, w in ipairs(UI.windows) do
+
+        if w == win then
+            return true
+        end
+    end
+
+    return false
+end
+
+--------------------------------------------------
+-- Reposition application terminal
+--------------------------------------------------
+
+local function repositionTerminal(win)
+
+    if not win then
+        return
+    end
+
+    if not win.terminal then
+        return
+    end
+
+    local contentWidth =
+        math.max(
+            1,
+            win.width - 2
+        )
+
+    local contentHeight =
+        math.max(
+            1,
+            win.height - 3
+        )
+
+    --------------------------------------------------
+    -- IMPORTANT:
+    --
+    -- The application terminal belongs to the
+    -- application window.
+    --
+    -- Its coordinates are relative to that window.
+    --------------------------------------------------
+
+    win.terminal.reposition(
+        2,
+        3,
+        contentWidth,
+        contentHeight
+    )
 end
 
 --------------------------------------------------
@@ -74,40 +186,80 @@ function UI.createWindow(
     local sw, sh =
         t.getSize()
 
+    sw = number(sw, 51)
+    sh = number(sh, 19)
+
     width =
-        math.max(
+        number(width, 30)
+
+    height =
+        number(height, 12)
+
+    x =
+        number(x, 2)
+
+    y =
+        number(y, 2)
+
+    --------------------------------------------------
+    -- Window size
+    --------------------------------------------------
+
+    width =
+        clamp(
+            width,
             UI.minWidth,
-            math.min(
-                width or 30,
-                sw
-            )
+            sw
         )
 
     height =
-        math.max(
+        clamp(
+            height,
             UI.minHeight,
-            math.min(
-                height or 15,
+            math.max(
+                UI.minHeight,
                 sh - 1
             )
         )
 
+    --------------------------------------------------
+    -- Window position
+    --------------------------------------------------
+
     x =
-        math.max(
+        clamp(
+            x,
             1,
-            math.min(
-                x or 2,
+            math.max(
+                1,
                 sw - width + 1
             )
         )
 
     y =
-        math.max(
+        clamp(
+            y,
             1,
-            math.min(
-                y or 2,
+            math.max(
+                1,
                 sh - height
             )
+        )
+
+    --------------------------------------------------
+    -- Create application window.
+    --
+    -- This is the actual buffered window.
+    --------------------------------------------------
+
+    local surface =
+        window.create(
+            t,
+            x,
+            y,
+            width,
+            height,
+            false
         )
 
     local win = {
@@ -121,6 +273,9 @@ function UI.createWindow(
 
         width = width,
         height = height,
+
+        surface = surface,
+        terminal = nil,
 
         visible = true,
         minimized = false,
@@ -137,14 +292,29 @@ function UI.createWindow(
         UI.nextID + 1
 
     --------------------------------------------------
-    -- Application terminal
+    -- Draw surface background.
+    --------------------------------------------------
+
+    surface.setBackgroundColor(
+        colors.black
+    )
+
+    surface.setTextColor(
+        colors.white
+    )
+
+    surface.clear()
+
+    --------------------------------------------------
+    -- Create application terminal INSIDE the
+    -- buffered window.
     --------------------------------------------------
 
     win.terminal =
         window.create(
-            t,
-            x + 1,
-            y + 2,
+            surface,
+            2,
+            3,
             math.max(1, width - 2),
             math.max(1, height - 3),
             true
@@ -165,37 +335,69 @@ function UI.createWindow(
         1
     )
 
+    --------------------------------------------------
+    -- Add window.
+    --------------------------------------------------
+
     table.insert(
         UI.windows,
         win
     )
 
-    UI.focus(win)
+    --------------------------------------------------
+    -- Draw chrome BEFORE showing it.
+    --------------------------------------------------
+
+    UI.drawWindow(win)
+
+    surface.setVisible(true)
+
+    --------------------------------------------------
+    -- Focus without accidentally restoring a
+    -- minimized window.
+    --------------------------------------------------
+
+    UI.setFocus(win)
 
     return win
 end
 
 --------------------------------------------------
--- Focus window
+-- Set focus
+--
+-- IMPORTANT:
+-- This does NOT change minimized state.
 --------------------------------------------------
 
-function UI.focus(win)
+function UI.setFocus(win)
 
     if not win then
         return
     end
 
+    if not containsWindow(win) then
+        return
+    end
+
+    if win.minimized then
+        return
+    end
+
     --------------------------------------------------
-    -- Make sure window is in the window list.
+    -- Clear focus.
     --------------------------------------------------
 
-    local found = false
+    for _, w in ipairs(UI.windows) do
+        w.focused = false
+    end
+
+    --------------------------------------------------
+    -- Put selected window on top.
+    --------------------------------------------------
 
     for i, w in ipairs(UI.windows) do
 
         if w == win then
-
-            found = true
 
             table.remove(
                 UI.windows,
@@ -206,50 +408,31 @@ function UI.focus(win)
         end
     end
 
-    if not found then
-        return
-    end
-
-    --------------------------------------------------
-    -- Put window on top.
-    --------------------------------------------------
-
     table.insert(
         UI.windows,
         win
     )
 
-    --------------------------------------------------
-    -- Clear focus from all windows.
-    --------------------------------------------------
-
-    for _, w in ipairs(UI.windows) do
-        w.focused = false
-    end
-
-    --------------------------------------------------
-    -- Restore minimized state.
-    --------------------------------------------------
-
-    win.minimized = false
-    win.visible = true
     win.focused = true
-
-    --------------------------------------------------
-    -- Restore terminal visibility.
-    --------------------------------------------------
-
-    if win.terminal then
-
-        win.terminal.setVisible(
-            true
-        )
-    end
 
     UI.focused = win
 
+    --------------------------------------------------
+    -- Make visible.
+    --------------------------------------------------
+
+    if win.surface then
+        win.surface.setVisible(true)
+    end
+
     UI.draw()
 end
+
+--------------------------------------------------
+-- Compatibility alias
+--------------------------------------------------
+
+UI.focus = UI.setFocus
 
 --------------------------------------------------
 -- Explicit restore
@@ -261,26 +444,35 @@ function UI.restoreWindow(win)
         return
     end
 
-    win.visible = true
+    if not containsWindow(win) then
+        return
+    end
+
     win.minimized = false
+    win.visible = true
+
     win.dragging = false
     win.resizing = false
 
-    if win.terminal then
-
-        win.terminal.setVisible(
-            true
-        )
+    if win.surface then
+        win.surface.setVisible(true)
     end
 
-    UI.focus(win)
+    if win.terminal then
+        win.terminal.setVisible(true)
+    end
+
+    UI.setFocus(win)
 end
 
 --------------------------------------------------
--- Find window at screen coordinates
+-- Find window at screen position
 --------------------------------------------------
 
 function UI.getWindowAt(x, y)
+
+    x = number(x, 0)
+    y = number(y, 0)
 
     for i = #UI.windows, 1, -1 do
 
@@ -312,6 +504,12 @@ function UI.drawDesktop()
     local width, height =
         t.getSize()
 
+    width =
+        number(width, 51)
+
+    height =
+        number(height, 19)
+
     t.setBackgroundColor(
         UI.desktopColor
     )
@@ -320,32 +518,7 @@ function UI.drawDesktop()
         colors.white
     )
 
-    --------------------------------------------------
-    -- IMPORTANT:
-    --
-    -- The desktop is drawn BEFORE application
-    -- terminals are shown.
-    --
-    -- This prevents us from repeatedly clearing
-    -- application window buffers.
-    --------------------------------------------------
-
     t.clear()
-
-    for y = 1, height - 1 do
-
-        t.setCursorPos(
-            1,
-            y
-        )
-
-        t.write(
-            string.rep(
-                " ",
-                width
-            )
-        )
-    end
 end
 
 --------------------------------------------------
@@ -354,22 +527,51 @@ end
 
 function UI.drawWindow(win)
 
+    if not win then
+        return
+    end
+
+    if not win.surface then
+        return
+    end
+
     if not win.visible
         or win.minimized then
 
         return
     end
 
-    local t = screen()
+    local w =
+        win.surface
+
+    local width =
+        math.max(
+            1,
+            win.width
+        )
+
+    local height =
+        math.max(
+            1,
+            win.height
+        )
 
     --------------------------------------------------
-    -- IMPORTANT:
+    -- Draw entire window background.
     --
-    -- We ONLY draw the window chrome here.
-    --
-    -- We do NOT clear or draw over the application
-    -- terminal area.
+    -- This is drawn INTO the window buffer,
+    -- not onto the native screen.
     --------------------------------------------------
+
+    w.setBackgroundColor(
+        colors.black
+    )
+
+    w.setTextColor(
+        colors.white
+    )
+
+    w.clear()
 
     --------------------------------------------------
     -- Title bar
@@ -377,30 +579,30 @@ function UI.drawWindow(win)
 
     if win.focused then
 
-        t.setBackgroundColor(
+        w.setBackgroundColor(
             UI.activeTitleColor
         )
 
     else
 
-        t.setBackgroundColor(
+        w.setBackgroundColor(
             UI.titleColor
         )
     end
 
-    t.setTextColor(
+    w.setTextColor(
         colors.white
     )
 
-    t.setCursorPos(
-        win.x,
-        win.y
+    w.setCursorPos(
+        1,
+        1
     )
 
-    t.write(
+    w.write(
         string.rep(
             " ",
-            win.width
+            width
         )
     )
 
@@ -409,12 +611,14 @@ function UI.drawWindow(win)
     --------------------------------------------------
 
     local title =
-        win.title
+        tostring(
+            win.title or "Window"
+        )
 
     local maxTitle =
         math.max(
             1,
-            win.width - 8
+            width - 9
         )
 
     if #title > maxTitle then
@@ -426,127 +630,156 @@ function UI.drawWindow(win)
             )
     end
 
-    t.setCursorPos(
-        win.x + 1,
-        win.y
+    w.setCursorPos(
+        2,
+        1
     )
 
-    t.write(title)
+    w.setTextColor(
+        colors.white
+    )
+
+    w.write(title)
 
     --------------------------------------------------
     -- Minimize button
     --------------------------------------------------
 
-    t.setBackgroundColor(
+    w.setBackgroundColor(
         win.focused
             and UI.activeTitleColor
             or UI.titleColor
     )
 
-    t.setCursorPos(
-        win.x + win.width - 5,
-        win.y
+    w.setCursorPos(
+        math.max(
+            1,
+            width - 5
+        ),
+        1
     )
 
-    t.write("_")
+    w.write("_")
 
     --------------------------------------------------
     -- Close button
     --------------------------------------------------
 
-    t.setBackgroundColor(
+    w.setBackgroundColor(
         UI.closeColor
     )
 
-    t.setCursorPos(
-        win.x + win.width - 2,
-        win.y
+    w.setCursorPos(
+        math.max(
+            1,
+            width - 2
+        ),
+        1
     )
 
-    t.write("X")
+    w.write("X")
 
     --------------------------------------------------
     -- Separator
     --------------------------------------------------
 
-    t.setBackgroundColor(
-        colors.black
-    )
+    if height >= 2 then
 
-    t.setTextColor(
-        colors.white
-    )
-
-    t.setCursorPos(
-        win.x,
-        win.y + 1
-    )
-
-    t.write(
-        string.rep(
-            "-",
-            win.width
+        w.setBackgroundColor(
+            colors.black
         )
-    )
+
+        w.setTextColor(
+            colors.white
+        )
+
+        w.setCursorPos(
+            1,
+            2
+        )
+
+        w.write(
+            string.rep(
+                "-",
+                width
+            )
+        )
+    end
 
     --------------------------------------------------
-    -- Window sides
+    -- Sides
     --------------------------------------------------
 
-    for y =
-        win.y + 2,
-        win.y + win.height - 2
-    do
+    if height >= 5
+        and width >= 2 then
 
-        t.setCursorPos(
-            win.x,
-            y
-        )
+        for row = 3, height - 2 do
 
-        t.write("|")
+            w.setBackgroundColor(
+                colors.black
+            )
 
-        t.setCursorPos(
-            win.x + win.width - 1,
-            y
-        )
+            w.setCursorPos(
+                1,
+                row
+            )
 
-        t.write("|")
+            w.write("|")
+
+            w.setCursorPos(
+                width,
+                row
+            )
+
+            w.write("|")
+        end
     end
 
     --------------------------------------------------
     -- Bottom border
     --------------------------------------------------
 
-    t.setCursorPos(
-        win.x,
-        win.y + win.height - 1
-    )
+    if height >= 3 then
 
-    t.write(
-        string.rep(
-            "-",
-            win.width
+        w.setBackgroundColor(
+            colors.black
         )
-    )
+
+        w.setCursorPos(
+            1,
+            height
+        )
+
+        w.write(
+            string.rep(
+                "-",
+                width
+            )
+        )
+    end
 
     --------------------------------------------------
     -- Resize handle
     --------------------------------------------------
 
-    t.setBackgroundColor(
-        colors.gray
-    )
+    if width >= 2
+        and height >= 2 then
 
-    t.setTextColor(
-        colors.white
-    )
+        w.setBackgroundColor(
+            colors.gray
+        )
 
-    t.setCursorPos(
-        win.x + win.width - 1,
-        win.y + win.height - 1
-    )
+        w.setTextColor(
+            colors.white
+        )
 
-    t.write("+")
+        w.setCursorPos(
+            width,
+            height
+        )
+
+        w.write("+")
+    end
 end
 
 --------------------------------------------------
@@ -559,6 +792,16 @@ function UI.drawTaskbar()
 
     local width, height =
         t.getSize()
+
+    width =
+        number(width, 51)
+
+    height =
+        number(height, 19)
+
+    --------------------------------------------------
+    -- Taskbar
+    --------------------------------------------------
 
     t.setBackgroundColor(
         UI.taskbarColor
@@ -581,16 +824,16 @@ function UI.drawTaskbar()
     )
 
     --------------------------------------------------
-    -- NexusOS button
+    -- Start button
     --------------------------------------------------
+
+    t.setBackgroundColor(
+        colors.gray
+    )
 
     t.setCursorPos(
         2,
         height
-    )
-
-    t.setBackgroundColor(
-        colors.gray
     )
 
     t.write(
@@ -598,32 +841,32 @@ function UI.drawTaskbar()
     )
 
     --------------------------------------------------
-    -- Application buttons
+    -- Applications
     --------------------------------------------------
 
-    local x = 15
+    local currentX = 15
 
     for _, win in ipairs(UI.windows) do
 
-        if win.visible
-            or win.minimized then
+        if win.visible then
 
             local label =
-                "[ " .. win.title .. " ]"
+                "[ "
+                .. tostring(win.title or "Window")
+                .. " ]"
 
-            if x + #label <= width then
+            if currentX + #label <= width then
 
-                if win.focused
-                    and not win.minimized then
-
-                    t.setBackgroundColor(
-                        colors.lightBlue
-                    )
-
-                elseif win.minimized then
+                if win.minimized then
 
                     t.setBackgroundColor(
                         colors.darkGray
+                    )
+
+                elseif win.focused then
+
+                    t.setBackgroundColor(
+                        colors.lightBlue
                     )
 
                 else
@@ -634,21 +877,23 @@ function UI.drawTaskbar()
                 end
 
                 t.setCursorPos(
-                    x,
+                    currentX,
                     height
                 )
 
                 t.write(label)
 
-                x =
-                    x + #label + 1
+                currentX =
+                    currentX
+                    + #label
+                    + 1
             end
         end
     end
 end
 
 --------------------------------------------------
--- Draw Start Menu
+-- Start menu
 --------------------------------------------------
 
 function UI.drawStartMenu()
@@ -658,13 +903,34 @@ function UI.drawStartMenu()
     local width, height =
         t.getSize()
 
-    local menuWidth = 24
-    local menuHeight = 8
+    width =
+        number(width, 51)
+
+    height =
+        number(height, 19)
+
+    local menuWidth =
+        math.min(
+            24,
+            width
+        )
+
+    local menuHeight =
+        math.min(
+            8,
+            math.max(
+                1,
+                height - 1
+            )
+        )
 
     local x = 2
 
     local y =
-        height - menuHeight
+        math.max(
+            1,
+            height - menuHeight
+        )
 
     t.setBackgroundColor(
         colors.gray
@@ -674,9 +940,7 @@ function UI.drawStartMenu()
         colors.white
     )
 
-    for row = 0,
-        menuHeight - 1
-    do
+    for row = 0, menuHeight - 1 do
 
         t.setCursorPos(
             x,
@@ -691,58 +955,63 @@ function UI.drawStartMenu()
         )
     end
 
-    t.setCursorPos(
-        x + 2,
-        y + 1
-    )
+    if menuHeight >= 2 then
 
-    t.setTextColor(
-        colors.yellow
-    )
+        t.setCursorPos(
+            x + 2,
+            y + 1
+        )
 
-    t.write(
-        "NexusOS"
-    )
+        t.setTextColor(
+            colors.yellow
+        )
+
+        t.write("NexusOS")
+    end
 
     t.setTextColor(
         colors.white
     )
 
-    t.setCursorPos(
-        x + 2,
-        y + 3
-    )
+    if menuHeight >= 4 then
 
-    t.write(
-        "Terminal"
-    )
+        t.setCursorPos(
+            x + 2,
+            y + 3
+        )
 
-    t.setCursorPos(
-        x + 2,
-        y + 4
-    )
+        t.write("Terminal")
+    end
 
-    t.write(
-        "Files"
-    )
+    if menuHeight >= 5 then
 
-    t.setCursorPos(
-        x + 2,
-        y + 5
-    )
+        t.setCursorPos(
+            x + 2,
+            y + 4
+        )
 
-    t.write(
-        "Settings"
-    )
+        t.write("Files")
+    end
 
-    t.setCursorPos(
-        x + 2,
-        y + 6
-    )
+    if menuHeight >= 6 then
 
-    t.write(
-        "Close Menu"
-    )
+        t.setCursorPos(
+            x + 2,
+            y + 5
+        )
+
+        t.write("Settings")
+    end
+
+    if menuHeight >= 7 then
+
+        t.setCursorPos(
+            x + 2,
+            y + 6
+        )
+
+        t.write("Close Menu")
+    end
 end
 
 --------------------------------------------------
@@ -751,10 +1020,34 @@ end
 
 function UI.draw()
 
+    local t = screen()
+
+    --------------------------------------------------
+    -- Hide all application surfaces while the native
+    -- desktop is being rebuilt.
+    --
+    -- This prevents the native desktop clear from
+    -- fighting with application buffers.
+    --------------------------------------------------
+
+    for _, win in ipairs(UI.windows) do
+
+        if win.surface then
+
+            win.surface.setVisible(false)
+        end
+    end
+
+    --------------------------------------------------
+    -- Desktop
+    --------------------------------------------------
+
     UI.drawDesktop()
 
     --------------------------------------------------
-    -- Draw windows
+    -- Windows
+    --
+    -- Bottom -> top.
     --------------------------------------------------
 
     for _, win in ipairs(UI.windows) do
@@ -764,24 +1057,28 @@ function UI.draw()
 
             UI.drawWindow(win)
 
-            --------------------------------------------------
-            -- Make sure application terminal is visible
-            -- at its current window position.
-            --------------------------------------------------
-
-            if win.terminal then
-                win.terminal.setVisible(true)
+            if win.surface then
+                win.surface.setVisible(true)
             end
         end
     end
 
+    --------------------------------------------------
+    -- Taskbar
+    --
+    -- Drawn AFTER windows so it remains on top.
+    --------------------------------------------------
+
     UI.drawTaskbar()
+
+    --------------------------------------------------
+    -- Start menu
+    --------------------------------------------------
 
     if UI.startMenu then
         UI.drawStartMenu()
     end
 end
-
 
 --------------------------------------------------
 -- Remove window
@@ -793,13 +1090,24 @@ function UI.removeWindow(win)
         return
     end
 
+    if not containsWindow(win) then
+        return
+    end
+
+    win.dragging = false
+    win.resizing = false
+
+    if win.surface then
+        win.surface.setVisible(false)
+    end
+
     win.visible = false
     win.minimized = false
     win.focused = false
 
-    if win.terminal then
-        win.terminal.setVisible(false)
-    end
+    --------------------------------------------------
+    -- Remove from list.
+    --------------------------------------------------
 
     for i, w in ipairs(UI.windows) do
 
@@ -819,14 +1127,10 @@ function UI.removeWindow(win)
     end
 
     --------------------------------------------------
-    -- Find another window.
+    -- Find next window.
     --------------------------------------------------
 
-    for i =
-        #UI.windows,
-        1,
-        -1
-    do
+    for i = #UI.windows, 1, -1 do
 
         local other =
             UI.windows[i]
@@ -834,7 +1138,7 @@ function UI.removeWindow(win)
         if other.visible
             and not other.minimized then
 
-            UI.focus(other)
+            UI.setFocus(other)
 
             return
         end
@@ -853,18 +1157,30 @@ function UI.minimize(win)
         return
     end
 
-    win.minimized = true
-    win.visible = true
-    win.focused = false
+    if not containsWindow(win) then
+        return
+    end
+
+    --------------------------------------------------
+    -- Stop movement.
+    --------------------------------------------------
 
     win.dragging = false
     win.resizing = false
 
-    if win.terminal then
+    --------------------------------------------------
+    -- Mark minimized.
+    --
+    -- visible stays TRUE so the taskbar still knows
+    -- the application exists.
+    --------------------------------------------------
 
-        win.terminal.setVisible(
-            false
-        )
+    win.minimized = true
+    win.visible = true
+    win.focused = false
+
+    if win.surface then
+        win.surface.setVisible(false)
     end
 
     if UI.focused == win then
@@ -872,32 +1188,33 @@ function UI.minimize(win)
     end
 
     --------------------------------------------------
-    -- Find another visible window.
+    -- Find another window to focus.
     --------------------------------------------------
 
-    for i =
-        #UI.windows,
-        1,
-        -1
-    do
+    for i = #UI.windows, 1, -1 do
 
         local other =
             UI.windows[i]
 
-        if other.visible
+        if other ~= win
+            and other.visible
             and not other.minimized then
 
-            UI.focus(other)
+            UI.setFocus(other)
 
             return
         end
     end
 
+    --------------------------------------------------
+    -- No other window.
+    --------------------------------------------------
+
     UI.draw()
 end
 
 --------------------------------------------------
--- Find taskbar application
+-- Taskbar lookup
 --------------------------------------------------
 
 function UI.getTaskbarWindowAt(
@@ -910,6 +1227,15 @@ function UI.getTaskbarWindowAt(
     local width, height =
         t.getSize()
 
+    width =
+        number(width, 51)
+
+    height =
+        number(height, 19)
+
+    x = number(x, 0)
+    y = number(y, 0)
+
     if y ~= height then
         return nil
     end
@@ -918,11 +1244,12 @@ function UI.getTaskbarWindowAt(
 
     for _, win in ipairs(UI.windows) do
 
-        if win.visible
-            or win.minimized then
+        if win.visible then
 
             local label =
-                "[ " .. win.title .. " ]"
+                "[ "
+                .. tostring(win.title or "Window")
+                .. " ]"
 
             if currentX + #label <= width then
 
@@ -933,7 +1260,9 @@ function UI.getTaskbarWindowAt(
                 end
 
                 currentX =
-                    currentX + #label + 1
+                    currentX
+                    + #label
+                    + 1
             end
         end
     end
@@ -945,11 +1274,32 @@ end
 -- Start dragging
 --------------------------------------------------
 
-function UI.startDrag(win, mouseX, mouseY)
+function UI.startDrag(
+    win,
+    mouseX,
+    mouseY
+)
 
     if not win then
         return
     end
+
+    if win.minimized then
+        return
+    end
+
+    mouseX = number(mouseX, win.x)
+    mouseY = number(mouseY, win.y)
+
+    --------------------------------------------------
+    -- Focus first.
+    --------------------------------------------------
+
+    UI.setFocus(win)
+
+    --------------------------------------------------
+    -- Start operation.
+    --------------------------------------------------
 
     UI.activeMode = "drag"
     UI.activeWindow = win
@@ -957,40 +1307,63 @@ function UI.startDrag(win, mouseX, mouseY)
     win.dragging = true
     win.resizing = false
 
-    --------------------------------------------------
-    -- Remember where inside the title bar we clicked.
-    --------------------------------------------------
-
     win.dragX =
         mouseX - win.x
 
     win.dragY =
         mouseY - win.y
-
-    --------------------------------------------------
-    -- Bring window to front.
-    --------------------------------------------------
-
-    UI.focus(win)
 end
 
 --------------------------------------------------
--- Drag window
+-- Drag
 --------------------------------------------------
 
-function UI.drag(win, mouseX, mouseY)
+function UI.drag(
+    win,
+    mouseX,
+    mouseY
+)
 
-    if not win or not win.dragging then
+    if not win then
         return
     end
 
+    if not win.dragging then
+        return
+    end
+
+    mouseX =
+        number(
+            mouseX,
+            win.x + win.dragX
+        )
+
+    mouseY =
+        number(
+            mouseY,
+            win.y + win.dragY
+        )
+
     local t = screen()
 
-    local screenWidth, screenHeight =
+    local screenWidth,
+        screenHeight =
         t.getSize()
 
+    screenWidth =
+        number(
+            screenWidth,
+            51
+        )
+
+    screenHeight =
+        number(
+            screenHeight,
+            19
+        )
+
     --------------------------------------------------
-    -- Calculate new position
+    -- Calculate position.
     --------------------------------------------------
 
     local newX =
@@ -1000,80 +1373,89 @@ function UI.drag(win, mouseX, mouseY)
         mouseY - win.dragY
 
     --------------------------------------------------
-    -- Keep inside screen
+    -- Keep inside screen.
     --------------------------------------------------
 
     newX =
-        math.max(
+        clamp(
+            newX,
             1,
-            newX
+            math.max(
+                1,
+                screenWidth - win.width + 1
+            )
         )
 
     newY =
-        math.max(
+        clamp(
+            newY,
             1,
-            newY
+            math.max(
+                1,
+                screenHeight - win.height
+            )
         )
 
-    if newX + win.width - 1 > screenWidth then
-
-        newX =
-            screenWidth - win.width + 1
-    end
-
-    if newY + win.height > screenHeight then
-
-        newY =
-            screenHeight - win.height
-    end
-
     --------------------------------------------------
-    -- Save position
+    -- Save position.
     --------------------------------------------------
 
     win.x = newX
     win.y = newY
 
     --------------------------------------------------
-    -- Move application terminal
+    -- MOVE THE ACTUAL BUFFERED WINDOW.
+    --
+    -- The application terminal is a child of this
+    -- surface, so it moves with the window.
     --------------------------------------------------
 
-    if win.terminal then
+    if win.surface then
 
-        win.terminal.reposition(
-            win.x + 1,
-            win.y + 2,
-            win.width - 2,
-            win.height - 3
+        win.surface.reposition(
+            win.x,
+            win.y,
+            win.width,
+            win.height
         )
-
     end
 
     --------------------------------------------------
-    -- Redraw desktop and windows
+    -- No terminal clearing.
+    -- No terminal recreation.
+    -- No content redraw.
+    --
+    -- The buffered application contents remain.
     --------------------------------------------------
 
     UI.draw()
 end
 
-
 --------------------------------------------------
--- Start resizing
+-- Start resize
 --------------------------------------------------
 
 function UI.startResize(win)
+
+    if not win then
+        return
+    end
+
+    if win.minimized then
+        return
+    end
+
+    UI.setFocus(win)
 
     UI.activeMode = "resize"
     UI.activeWindow = win
 
     win.resizing = true
     win.dragging = false
-
-    UI.focus(win)
 end
 
 --------------------------------------------------
--- Resize window
+-- Resize
 --------------------------------------------------
 
 function UI.resize(
@@ -1082,17 +1464,47 @@ function UI.resize(
     mouseY
 )
 
-    if not win
-        or not win.resizing then
-
+    if not win then
         return
     end
+
+    if not win.resizing then
+        return
+    end
+
+    mouseX =
+        number(
+            mouseX,
+            win.x + win.width - 1
+        )
+
+    mouseY =
+        number(
+            mouseY,
+            win.y + win.height - 1
+        )
 
     local t = screen()
 
     local screenWidth,
         screenHeight =
         t.getSize()
+
+    screenWidth =
+        number(
+            screenWidth,
+            51
+        )
+
+    screenHeight =
+        number(
+            screenHeight,
+            19
+        )
+
+    --------------------------------------------------
+    -- New dimensions.
+    --------------------------------------------------
 
     local newWidth =
         mouseX - win.x + 1
@@ -1112,38 +1524,66 @@ function UI.resize(
             newHeight
         )
 
-    local maxWidth =
-        screenWidth - win.x + 1
+    --------------------------------------------------
+    -- Don't go beyond screen.
+    --------------------------------------------------
 
-    if newWidth > maxWidth then
-        newWidth = maxWidth
-    end
+    newWidth =
+        math.min(
+            newWidth,
+            screenWidth - win.x + 1
+        )
 
-    local maxHeight =
-        screenHeight - win.y
+    newHeight =
+        math.min(
+            newHeight,
+            screenHeight - win.y
+        )
 
-    if newHeight > maxHeight then
-        newHeight = maxHeight
-    end
+    newWidth =
+        math.max(
+            UI.minWidth,
+            newWidth
+        )
 
-    if newWidth == win.width
-        and newHeight == win.height then
+    newHeight =
+        math.max(
+            UI.minHeight,
+            newHeight
+        )
 
-        return
-    end
+    --------------------------------------------------
+    -- Save.
+    --------------------------------------------------
 
     win.width = newWidth
     win.height = newHeight
 
-    if win.terminal then
+    --------------------------------------------------
+    -- Resize actual buffered surface.
+    --------------------------------------------------
 
-        win.terminal.reposition(
-            win.x + 1,
-            win.y + 2,
-            math.max(1, win.width - 2),
-            math.max(1, win.height - 3)
+    if win.surface then
+
+        win.surface.reposition(
+            win.x,
+            win.y,
+            win.width,
+            win.height
         )
     end
+
+    --------------------------------------------------
+    -- Resize application child.
+    --------------------------------------------------
+
+    repositionTerminal(win)
+
+    --------------------------------------------------
+    -- Redraw chrome.
+    --------------------------------------------------
+
+    UI.drawWindow(win)
 
     if UI.onResize then
         UI.onResize(win)
@@ -1188,8 +1628,17 @@ function UI.mouseClick(
     local width, height =
         t.getSize()
 
+    width =
+        number(width, 51)
+
+    height =
+        number(height, 19)
+
+    x = number(x, 0)
+    y = number(y, 0)
+
     --------------------------------------------------
-    -- START BUTTON
+    -- Start button
     --------------------------------------------------
 
     if y == height
@@ -1205,7 +1654,7 @@ function UI.mouseClick(
     end
 
     --------------------------------------------------
-    -- TASKBAR
+    -- Taskbar
     --------------------------------------------------
 
     if y == height then
@@ -1218,6 +1667,10 @@ function UI.mouseClick(
 
         if taskWindow then
 
+            --------------------------------------------------
+            -- Minimized -> restore.
+            --------------------------------------------------
+
             if taskWindow.minimized then
 
                 UI.restoreWindow(
@@ -1227,9 +1680,15 @@ function UI.mouseClick(
                 return true
             end
 
+            --------------------------------------------------
+            -- Normal -> focus.
+            --------------------------------------------------
+
             if UI.focused ~= taskWindow then
 
-                UI.focus(taskWindow)
+                UI.setFocus(
+                    taskWindow
+                )
 
             else
 
@@ -1241,24 +1700,34 @@ function UI.mouseClick(
     end
 
     --------------------------------------------------
-    -- START MENU
+    -- Start menu
     --------------------------------------------------
 
     if UI.startMenu then
 
         local menuX = 2
 
+        local menuHeight = 8
+
         local menuY =
-            height - 8
+            math.max(
+                1,
+                height - menuHeight
+            )
 
-        if x >= menuX
-            and x <= menuX + 24
-            and y == menuY + 3 then
+        --------------------------------------------------
+        -- Terminal
+        --------------------------------------------------
+
+        if y == menuY + 3 then
 
             UI.startMenu = false
 
             if UI.onLaunch then
-                UI.onLaunch("terminal")
+
+                UI.onLaunch(
+                    "terminal"
+                )
             end
 
             UI.draw()
@@ -1266,14 +1735,19 @@ function UI.mouseClick(
             return true
         end
 
-        if x >= menuX
-            and x <= menuX + 24
-            and y == menuY + 4 then
+        --------------------------------------------------
+        -- Files
+        --------------------------------------------------
+
+        if y == menuY + 4 then
 
             UI.startMenu = false
 
             if UI.onLaunch then
-                UI.onLaunch("files")
+
+                UI.onLaunch(
+                    "files"
+                )
             end
 
             UI.draw()
@@ -1281,20 +1755,29 @@ function UI.mouseClick(
             return true
         end
 
-        if x >= menuX
-            and x <= menuX + 24
-            and y == menuY + 5 then
+        --------------------------------------------------
+        -- Settings
+        --------------------------------------------------
+
+        if y == menuY + 5 then
 
             UI.startMenu = false
 
             if UI.onLaunch then
-                UI.onLaunch("settings")
+
+                UI.onLaunch(
+                    "settings"
+                )
             end
 
             UI.draw()
 
             return true
         end
+
+        --------------------------------------------------
+        -- Close menu
+        --------------------------------------------------
 
         if y == menuY + 6 then
 
@@ -1307,7 +1790,7 @@ function UI.mouseClick(
     end
 
     --------------------------------------------------
-    -- WINDOW
+    -- Find window.
     --------------------------------------------------
 
     local win =
@@ -1321,23 +1804,33 @@ function UI.mouseClick(
     end
 
     --------------------------------------------------
-    -- CLOSE
+    -- Focus.
+    --------------------------------------------------
+
+    UI.setFocus(win)
+
+    --------------------------------------------------
+    -- Close button.
     --------------------------------------------------
 
     if y == win.y
         and x == win.x + win.width - 2 then
 
         if UI.onClose then
+
             UI.onClose(win)
+
         else
+
             UI.removeWindow(win)
+
         end
 
         return true
     end
 
     --------------------------------------------------
-    -- MINIMIZE
+    -- Minimize button.
     --------------------------------------------------
 
     if y == win.y
@@ -1350,7 +1843,7 @@ function UI.mouseClick(
     end
 
     --------------------------------------------------
-    -- RESIZE HANDLE
+    -- Resize handle.
     --------------------------------------------------
 
     if x == win.x + win.width - 1
@@ -1362,7 +1855,7 @@ function UI.mouseClick(
     end
 
     --------------------------------------------------
-    -- TITLE BAR
+    -- Title bar.
     --------------------------------------------------
 
     if y == win.y then
@@ -1377,10 +1870,21 @@ function UI.mouseClick(
     end
 
     --------------------------------------------------
-    -- CONTENT
+    -- Content.
+    --
+    -- Tell kernel/application that this click was
+    -- inside the application.
     --------------------------------------------------
 
-    UI.focus(win)
+    if UI.onContentClick then
+
+        return UI.onContentClick(
+            win,
+            button,
+            x - win.x - 1,
+            y - win.y - 2
+        ) or false
+    end
 
     return false
 end
@@ -1394,6 +1898,9 @@ function UI.mouseDrag(
     x,
     y
 )
+
+    x = number(x, 0)
+    y = number(y, 0)
 
     if UI.activeMode == "drag"
         and UI.activeWindow then
@@ -1432,7 +1939,7 @@ function UI.mouseUp()
 end
 
 --------------------------------------------------
--- Handle event
+-- Event handler
 --------------------------------------------------
 
 function UI.handleEvent(
@@ -1457,14 +1964,24 @@ function UI.handleEvent(
 end
 
 --------------------------------------------------
--- Redirect to window
+-- Redirect to application
 --------------------------------------------------
 
 function UI.redirect(win)
 
-    if not win
-        or not win.terminal then
+    if not win then
+        return false
+    end
 
+    if not win.terminal then
+        return false
+    end
+
+    --------------------------------------------------
+    -- Never redirect into a minimized window.
+    --------------------------------------------------
+
+    if win.minimized then
         return false
     end
 
@@ -1485,5 +2002,31 @@ function UI.restore()
         term.native()
     )
 end
+
+--------------------------------------------------
+-- Get application terminal
+--------------------------------------------------
+
+function UI.getTerminal(win)
+
+    if not win then
+        return nil
+    end
+
+    return win.terminal
+end
+
+--------------------------------------------------
+-- Get focused window
+--------------------------------------------------
+
+function UI.getFocused()
+
+    return UI.focused
+end
+
+--------------------------------------------------
+-- Return UI
+--------------------------------------------------
 
 return UI
