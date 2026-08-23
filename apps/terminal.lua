@@ -24,6 +24,27 @@ do
 end
 
 --------------------------------------------------
+-- Resolve program
+--
+-- Always make /rom an absolute path.
+--------------------------------------------------
+
+local function resolveProgram(command)
+    local program = shell.resolveProgram(command)
+
+    if program == nil then
+        return nil
+    end
+
+    -- Normalize ./rom/... to /rom/...
+    if program:sub(1, 6) == "./rom/" then
+        program = "/rom/" .. program:sub(7)
+    end
+
+    return program
+end
+
+--------------------------------------------------
 -- History
 --------------------------------------------------
 
@@ -601,7 +622,7 @@ while true do
     elseif command ~= nil then
 
         local program =
-            shell.resolveProgram(command)
+            resolveProgram(command)
 
         --------------------------------------------------
         -- Command doesn't exist
@@ -631,7 +652,7 @@ while true do
             table.remove(args, 1)
 
             shell.run(
-                program,
+                command,
                 table.unpack(args)
             )
         end
