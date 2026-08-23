@@ -42,11 +42,27 @@ end
 --------------------------------------------------
 
 local function num(value, fallback)
-    if type(value) == "number" then
-        return value
+    value = tonumber(value)
+
+    if value == nil then
+        return fallback
     end
 
-    return fallback
+    return value
+end
+
+--------------------------------------------------
+-- Safe mouse coordinates
+--------------------------------------------------
+
+local function mousePosition(x, y)
+    x = num(x, 0)
+    y = num(y, 0)
+
+    x = math.floor(x)
+    y = math.floor(y)
+
+    return x, y
 end
 
 --------------------------------------------------
@@ -98,8 +114,11 @@ local function getScreenSize()
 
     local w, h = t.getSize()
 
-    w = math.max(1, num(w, 51))
-    h = math.max(2, num(h, 19))
+    w = num(w, 51)
+    h = num(h, 19)
+
+    w = math.max(1, math.floor(w))
+    h = math.max(2, math.floor(h))
 
     return w, h
 end
@@ -113,8 +132,11 @@ local function resizeTerminal(win)
         return
     end
 
-    local cw = math.max(1, win.width - 2)
-    local ch = math.max(1, win.height - 3)
+    local width = num(win.width, UI.minWidth)
+    local height = num(win.height, UI.minHeight)
+
+    local cw = math.max(1, math.floor(width - 2))
+    local ch = math.max(1, math.floor(height - 3))
 
     win.terminal.reposition(
         2,
@@ -150,6 +172,9 @@ function UI.createWindow(
         math.max(UI.minHeight, sh - 1)
     )
 
+    width = math.floor(width)
+    height = math.floor(height)
+
     x = clamp(
         x or 2,
         1,
@@ -162,12 +187,11 @@ function UI.createWindow(
         math.max(1, sh - height)
     )
 
+    x = math.floor(x)
+    y = math.floor(y)
+
     --------------------------------------------------
     -- Parent window.
-    --
-    -- IMPORTANT:
-    -- The application owns the inside of this buffer.
-    -- The UI only draws the chrome.
     --------------------------------------------------
 
     local surface = window.create(
@@ -213,8 +237,6 @@ function UI.createWindow(
     --------------------------------------------------
     -- Application terminal.
     --
-    -- It starts at (2,3) inside the window:
-    --
     -- row 1 = title
     -- row 2 = separator
     -- row 3+ = application
@@ -250,6 +272,7 @@ end
 --------------------------------------------------
 
 function UI.focus(win)
+
     if not win then
         return
     end
@@ -275,6 +298,7 @@ function UI.focus(win)
     --------------------------------------------------
 
     for i, w in ipairs(UI.windows) do
+
         if w == win then
             table.remove(UI.windows, i)
             break
@@ -301,6 +325,7 @@ UI.setFocus = UI.focus
 --------------------------------------------------
 
 function UI.restoreWindow(win)
+
     if not win then
         return
     end
@@ -330,14 +355,15 @@ end
 --------------------------------------------------
 
 function UI.getWindowAt(x, y)
-    x = num(x, 0)
-    y = num(y, 0)
+
+    x, y = mousePosition(x, y)
 
     for i = #UI.windows, 1, -1 do
 
         local win = UI.windows[i]
 
-        if win.visible
+        if win
+            and win.visible
             and not win.minimized
             and x >= win.x
             and x < win.x + win.width
@@ -366,20 +392,53 @@ function UI.drawDesktop()
 
     t.clear()
 
-    --------------------------------------------------
-    -- Desktop title
-    --------------------------------------------------
-
     t.setCursorPos(2, 1)
 
     t.write("NexusOS")
 end
 
 --------------------------------------------------
--- Window chrome
+-- Window button coordinates
 --
--- IMPORTANT:
--- We NEVER clear the application area here.
+-- These are screen coordinates.
+--
+-- The visual buttons are:
+--
+-- _ = width - 5
+-- X = width - 2
+-- + = width, height
+--
+-- We intentionally use the actual displayed
+-- coordinates for the hit tests.
+--------------------------------------------------
+
+local function getWindowButtons(win)
+
+    if not win then
+        return nil
+    end
+
+    local minimizeX =
+        win.x + win.width - 5
+
+    local closeX =
+        win.x + win.width - 2
+
+    local resizeX =
+        win.x + win.width - 1
+
+    local resizeY =
+        win.y + win.height - 1
+
+    return
+        minimizeX,
+        closeX,
+        resizeX,
+        resizeY
+end
+
+--------------------------------------------------
+-- Window chrome
 --------------------------------------------------
 
 function UI.drawWindow(win)
@@ -398,37 +457,65 @@ function UI.drawWindow(win)
 
     local w = win.surface
 
-    local width = math.max(1, win.width)
-    local height = math.max(1, win.height)
+    local width =
+        math.max(
+            1,
+            math.floor(
+                num(win.width, 1)
+            )
+        )
+
+    local height =
+        math.max(
+            1,
+            math.floor(
+                num(win.height, 1)
+            )
+        )
 
     --------------------------------------------------
     -- Title
     --------------------------------------------------
 
     if win.focused then
-        w.setBackgroundColor(UI.activeTitleColor)
+        w.setBackgroundColor(
+            UI.activeTitleColor
+        )
     else
-        w.setBackgroundColor(UI.titleColor)
+        w.setBackgroundColor(
+            UI.titleColor
+        )
     end
 
     w.setTextColor(colors.white)
 
     w.setCursorPos(1, 1)
-    w.write(string.rep(" ", width))
+
+    w.write(
+        string.rep(" ", width)
+    )
 
     --------------------------------------------------
     -- Title text
     --------------------------------------------------
 
-    local title = tostring(win.title or "Window")
+    local title =
+        tostring(
+            win.title or "Window"
+        )
 
-    local maxTitle = math.max(
-        1,
-        width - 10
-    )
+    local maxTitle =
+        math.max(
+            1,
+            width - 10
+        )
 
     if #title > maxTitle then
-        title = title:sub(1, maxTitle)
+        title =
+            title:sub(
+                1,
+                maxTitle
+            )
     end
 
     w.setCursorPos(2, 1)
@@ -444,8 +531,14 @@ function UI.drawWindow(win)
             or UI.titleColor
     )
 
+    local minimizeLocalX =
+        math.max(
+            1,
+            width - 5
+        )
+
     w.setCursorPos(
-        math.max(1, width - 5),
+        minimizeLocalX,
         1
     )
 
@@ -455,10 +548,18 @@ function UI.drawWindow(win)
     -- Close
     --------------------------------------------------
 
-    w.setBackgroundColor(UI.closeColor)
+    w.setBackgroundColor(
+        UI.closeColor
+    )
+
+    local closeLocalX =
+        math.max(
+            1,
+            width - 2
+        )
 
     w.setCursorPos(
-        math.max(1, width - 2),
+        closeLocalX,
         1
     )
 
@@ -482,16 +583,15 @@ function UI.drawWindow(win)
 
     --------------------------------------------------
     -- Left/right borders
-    --
-    -- Do NOT touch application terminal area
-    -- except for the two border columns.
     --------------------------------------------------
 
     if width >= 2 and height >= 5 then
 
         for row = 3, height - 2 do
 
-            w.setBackgroundColor(colors.black)
+            w.setBackgroundColor(
+                colors.black
+            )
 
             w.setCursorPos(1, row)
             w.write("|")
@@ -507,12 +607,20 @@ function UI.drawWindow(win)
 
     if height >= 3 then
 
-        w.setBackgroundColor(colors.black)
+        w.setBackgroundColor(
+            colors.black
+        )
 
-        w.setCursorPos(1, height)
+        w.setCursorPos(
+            1,
+            height
+        )
 
         w.write(
-            string.rep("-", width)
+            string.rep(
+                "-",
+                width
+            )
         )
     end
 
@@ -522,10 +630,18 @@ function UI.drawWindow(win)
 
     if width >= 2 and height >= 2 then
 
-        w.setBackgroundColor(colors.gray)
-        w.setTextColor(colors.white)
+        w.setBackgroundColor(
+            colors.gray
+        )
 
-        w.setCursorPos(width, height)
+        w.setTextColor(
+            colors.white
+        )
+
+        w.setCursorPos(
+            width,
+            height
+        )
 
         w.write("+")
     end
@@ -539,26 +655,45 @@ function UI.drawTaskbar()
 
     local t = screen()
 
-    local width, height = getScreenSize()
+    local width, height =
+        getScreenSize()
 
-    t.setBackgroundColor(UI.taskbarColor)
-    t.setTextColor(colors.white)
+    t.setBackgroundColor(
+        UI.taskbarColor
+    )
 
-    t.setCursorPos(1, height)
+    t.setTextColor(
+        colors.white
+    )
+
+    t.setCursorPos(
+        1,
+        height
+    )
 
     t.write(
-        string.rep(" ", width)
+        string.rep(
+            " ",
+            width
+        )
     )
 
     --------------------------------------------------
     -- Start
     --------------------------------------------------
 
-    t.setBackgroundColor(colors.gray)
+    t.setBackgroundColor(
+        colors.gray
+    )
 
-    t.setCursorPos(2, height)
+    t.setCursorPos(
+        2,
+        height
+    )
 
-    t.write("[ NexusOS ]")
+    t.write(
+        "[ NexusOS ]"
+    )
 
     --------------------------------------------------
     -- Applications
@@ -571,7 +706,9 @@ function UI.drawTaskbar()
         if win.visible then
 
             local label =
-                "[ " .. tostring(win.title) .. " ]"
+                "[ "
+                .. tostring(win.title)
+                .. " ]"
 
             if x + #label <= width then
 
@@ -594,11 +731,15 @@ function UI.drawTaskbar()
                     )
                 end
 
-                t.setCursorPos(x, height)
+                t.setCursorPos(
+                    x,
+                    height
+                )
 
                 t.write(label)
 
-                x = x + #label + 1
+                x =
+                    x + #label + 1
             end
         end
     end
@@ -612,20 +753,35 @@ function UI.drawStartMenu()
 
     local t = screen()
 
-    local width, height = getScreenSize()
+    local width, height =
+        getScreenSize()
 
-    local menuWidth = math.min(25, width - 2)
+    local menuWidth =
+        math.min(
+            25,
+            math.max(
+                1,
+                width - 2
+            )
+        )
+
     local menuHeight = 9
 
     local x = 2
 
-    local y = math.max(
-        1,
-        height - menuHeight
+    local y =
+        math.max(
+            1,
+            height - menuHeight
+        )
+
+    t.setBackgroundColor(
+        colors.gray
     )
 
-    t.setBackgroundColor(colors.gray)
-    t.setTextColor(colors.white)
+    t.setTextColor(
+        colors.white
+    )
 
     for row = 0, menuHeight - 1 do
 
@@ -637,28 +793,55 @@ function UI.drawStartMenu()
             )
 
             t.write(
-                string.rep(" ", menuWidth)
+                string.rep(
+                    " ",
+                    menuWidth
+                )
             )
         end
     end
 
-    t.setCursorPos(x + 2, y + 1)
+    t.setCursorPos(
+        x + 2,
+        y + 1
+    )
 
-    t.setTextColor(colors.yellow)
+    t.setTextColor(
+        colors.yellow
+    )
+
     t.write("NexusOS")
 
-    t.setTextColor(colors.white)
+    t.setTextColor(
+        colors.white
+    )
 
-    t.setCursorPos(x + 2, y + 3)
+    t.setCursorPos(
+        x + 2,
+        y + 3
+    )
+
     t.write("Terminal")
 
-    t.setCursorPos(x + 2, y + 4)
+    t.setCursorPos(
+        x + 2,
+        y + 4
+    )
+
     t.write("Files")
 
-    t.setCursorPos(x + 2, y + 5)
+    t.setCursorPos(
+        x + 2,
+        y + 5
+    )
+
     t.write("Settings")
 
-    t.setCursorPos(x + 2, y + 6)
+    t.setCursorPos(
+        x + 2,
+        y + 6
+    )
+
     t.write("Close Menu")
 end
 
@@ -667,13 +850,6 @@ end
 --------------------------------------------------
 
 function UI.draw()
-
-    local t = screen()
-
-    --------------------------------------------------
-    -- Hide application surfaces while desktop
-    -- is redrawn.
-    --------------------------------------------------
 
     for _, win in ipairs(UI.windows) do
 
@@ -702,7 +878,7 @@ function UI.draw()
     end
 
     --------------------------------------------------
-    -- Show windows in correct order.
+    -- Show windows
     --------------------------------------------------
 
     for _, win in ipairs(UI.windows) do
@@ -716,7 +892,7 @@ function UI.draw()
     end
 
     --------------------------------------------------
-    -- Taskbar must be last on native screen.
+    -- Taskbar
     --------------------------------------------------
 
     UI.drawTaskbar()
@@ -751,7 +927,10 @@ function UI.removeWindow(win)
 
         if w == win then
 
-            table.remove(UI.windows, i)
+            table.remove(
+                UI.windows,
+                i
+            )
 
             break
         end
@@ -767,7 +946,8 @@ function UI.removeWindow(win)
 
     for i = #UI.windows, 1, -1 do
 
-        local other = UI.windows[i]
+        local other =
+            UI.windows[i]
 
         if other.visible
             and not other.minimized then
@@ -816,7 +996,8 @@ function UI.minimize(win)
 
     for i = #UI.windows, 1, -1 do
 
-        local other = UI.windows[i]
+        local other =
+            UI.windows[i]
 
         if other ~= win
             and other.visible
@@ -837,7 +1018,14 @@ end
 
 function UI.getTaskbarWindowAt(x, y)
 
-    local width, height = getScreenSize()
+    local width, height =
+        getScreenSize()
+
+    x, y =
+        mousePosition(
+            x,
+            y
+        )
 
     if y ~= height then
         return nil
@@ -850,7 +1038,9 @@ function UI.getTaskbarWindowAt(x, y)
         if win.visible then
 
             local label =
-                "[ " .. tostring(win.title) .. " ]"
+                "[ "
+                .. tostring(win.title)
+                .. " ]"
 
             if currentX + #label <= width then
 
@@ -861,7 +1051,9 @@ function UI.getTaskbarWindowAt(x, y)
                 end
 
                 currentX =
-                    currentX + #label + 1
+                    currentX
+                    + #label
+                    + 1
             end
         end
     end
@@ -873,11 +1065,21 @@ end
 -- Start drag
 --------------------------------------------------
 
-function UI.startDrag(win, mouseX, mouseY)
+function UI.startDrag(
+    win,
+    mouseX,
+    mouseY
+)
 
     if not win then
         return
     end
+
+    mouseX, mouseY =
+        mousePosition(
+            mouseX,
+            mouseY
+        )
 
     UI.focus(win)
 
@@ -887,15 +1089,22 @@ function UI.startDrag(win, mouseX, mouseY)
     win.dragging = true
     win.resizing = false
 
-    win.dragX = mouseX - win.x
-    win.dragY = mouseY - win.y
+    win.dragX =
+        mouseX - win.x
+
+    win.dragY =
+        mouseY - win.y
 end
 
 --------------------------------------------------
 -- Drag
 --------------------------------------------------
 
-function UI.drag(win, mouseX, mouseY)
+function UI.drag(
+    win,
+    mouseX,
+    mouseY
+)
 
     if not win then
         return
@@ -905,7 +1114,14 @@ function UI.drag(win, mouseX, mouseY)
         return
     end
 
-    local sw, sh = getScreenSize()
+    mouseX, mouseY =
+        mousePosition(
+            mouseX,
+            mouseY
+        )
+
+    local sw, sh =
+        getScreenSize()
 
     local newX =
         mouseX - win.dragX
@@ -916,16 +1132,27 @@ function UI.drag(win, mouseX, mouseY)
     newX = clamp(
         newX,
         1,
-        math.max(1, sw - win.width + 1)
+        math.max(
+            1,
+            sw - win.width + 1
+        )
     )
 
     newY = clamp(
         newY,
         1,
-        math.max(1, sh - win.height)
+        math.max(
+            1,
+            sh - win.height
+        )
     )
 
-    if newX == win.x and newY == win.y then
+    newX = math.floor(newX)
+    newY = math.floor(newY)
+
+    if newX == win.x
+        and newY == win.y then
+
         return
     end
 
@@ -972,7 +1199,11 @@ end
 -- Resize
 --------------------------------------------------
 
-function UI.resize(win, mouseX, mouseY)
+function UI.resize(
+    win,
+    mouseX,
+    mouseY
+)
 
     if not win then
         return
@@ -982,7 +1213,14 @@ function UI.resize(win, mouseX, mouseY)
         return
     end
 
-    local sw, sh = getScreenSize()
+    mouseX, mouseY =
+        mousePosition(
+            mouseX,
+            mouseY
+        )
+
+    local sw, sh =
+        getScreenSize()
 
     local newWidth =
         mouseX - win.x + 1
@@ -990,21 +1228,29 @@ function UI.resize(win, mouseX, mouseY)
     local newHeight =
         mouseY - win.y + 1
 
-    newWidth = math.max(
-        UI.minWidth,
-        newWidth
-    )
+    newWidth =
+        math.max(
+            UI.minWidth,
+            newWidth
+        )
 
-    newHeight = math.max(
-        UI.minHeight,
-        newHeight
-    )
+    newHeight =
+        math.max(
+            UI.minHeight,
+            newHeight
+        )
 
     local maxWidth =
-        math.max(1, sw - win.x + 1)
+        math.max(
+            1,
+            sw - win.x + 1
+        )
 
     local maxHeight =
-        math.max(1, sh - win.y)
+        math.max(
+            1,
+            sh - win.y
+        )
 
     newWidth =
         math.min(
@@ -1017,6 +1263,12 @@ function UI.resize(win, mouseX, mouseY)
             newHeight,
             maxHeight
         )
+
+    newWidth =
+        math.floor(newWidth)
+
+    newHeight =
+        math.floor(newHeight)
 
     win.width = newWidth
     win.height = newHeight
@@ -1065,9 +1317,20 @@ end
 -- Mouse
 --------------------------------------------------
 
-function UI.mouseClick(button, x, y)
+function UI.mouseClick(
+    button,
+    x,
+    y
+)
 
-    local width, height = getScreenSize()
+    x, y =
+        mousePosition(
+            x,
+            y
+        )
+
+    local width, height =
+        getScreenSize()
 
     --------------------------------------------------
     -- Start button
@@ -1077,7 +1340,8 @@ function UI.mouseClick(button, x, y)
         and x >= 2
         and x <= 13 then
 
-        UI.startMenu = not UI.startMenu
+        UI.startMenu =
+            not UI.startMenu
 
         UI.draw()
 
@@ -1091,7 +1355,10 @@ function UI.mouseClick(button, x, y)
     if y == height then
 
         local task =
-            UI.getTaskbarWindowAt(x, y)
+            UI.getTaskbarWindowAt(
+                x,
+                y
+            )
 
         if task then
 
@@ -1102,7 +1369,6 @@ function UI.mouseClick(button, x, y)
             elseif UI.focused ~= task then
 
                 UI.focus(task)
-
             end
 
             return true
@@ -1116,7 +1382,12 @@ function UI.mouseClick(button, x, y)
     if UI.startMenu then
 
         local menuX = 2
-        local menuY = math.max(1, height - 9)
+
+        local menuY =
+            math.max(
+                1,
+                height - 9
+            )
 
         if x >= menuX
             and x <= menuX + 25
@@ -1173,7 +1444,7 @@ function UI.mouseClick(button, x, y)
         end
 
         --------------------------------------------------
-        -- Don't click through the menu.
+        -- Don't click through menu.
         --------------------------------------------------
 
         if x >= menuX
@@ -1190,28 +1461,46 @@ function UI.mouseClick(button, x, y)
     --------------------------------------------------
 
     local win =
-        UI.getWindowAt(x, y)
+        UI.getWindowAt(
+            x,
+            y
+        )
 
     if not win then
         return false
     end
 
     --------------------------------------------------
-    -- Focus.
+    -- Button coordinates
     --------------------------------------------------
 
-    UI.focus(win)
+    local minimizeX,
+        closeX,
+        resizeX,
+        resizeY =
+        getWindowButtons(win)
 
     --------------------------------------------------
     -- Close
+    --
+    -- The displayed X is one character farther
+    -- right than the old click target on the user's
+    -- terminal, so accept the displayed position
+    -- plus its immediate neighboring cell.
     --------------------------------------------------
 
     if y == win.y
-        and x == win.x + win.width - 2 then
+        and (
+            x == closeX
+            or x == closeX + 1
+        ) then
 
         if UI.onClose then
+
             UI.onClose(win)
+
         else
+
             UI.removeWindow(win)
         end
 
@@ -1220,11 +1509,17 @@ function UI.mouseClick(button, x, y)
 
     --------------------------------------------------
     -- Minimize
+    --
+    -- Accept the displayed _ and one neighboring
+    -- cell. This prevents the title bar from being
+    -- accidentally interpreted as a drag.
     --------------------------------------------------
 
     if y == win.y
-        and x >= win.x + win.width - 5
-        and x <= win.x + win.width - 4 then
+        and (
+            x == minimizeX
+            or x == minimizeX + 1
+        ) then
 
         UI.minimize(win)
 
@@ -1233,10 +1528,14 @@ function UI.mouseClick(button, x, y)
 
     --------------------------------------------------
     -- Resize
+    --
+    -- The + is displayed at the bottom-right local
+    -- coordinate (width,height), which corresponds
+    -- to screen (win.x+width-1, win.y+height-1).
     --------------------------------------------------
 
-    if x == win.x + win.width - 1
-        and y == win.y + win.height - 1 then
+    if x == resizeX
+        and y == resizeY then
 
         UI.startResize(win)
 
@@ -1269,7 +1568,17 @@ end
 -- Mouse drag
 --------------------------------------------------
 
-function UI.mouseDrag(button, x, y)
+function UI.mouseDrag(
+    button,
+    x,
+    y
+)
+
+    x, y =
+        mousePosition(
+            x,
+            y
+        )
 
     if UI.activeMode == "drag"
         and UI.activeWindow then
@@ -1303,7 +1612,6 @@ end
 --------------------------------------------------
 
 function UI.mouseUp()
-
     return UI.stopMouseOperation()
 end
 
@@ -1311,7 +1619,10 @@ end
 -- Event handler
 --------------------------------------------------
 
-function UI.handleEvent(event, ...)
+function UI.handleEvent(
+    event,
+    ...
+)
 
     if event == "mouse_click" then
 
@@ -1343,7 +1654,9 @@ function UI.redirect(win)
         return false
     end
 
-    term.redirect(win.terminal)
+    term.redirect(
+        win.terminal
+    )
 
     return true
 end
