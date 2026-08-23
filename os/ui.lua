@@ -1,1380 +1,776 @@
--- NexusOS UI
--- Simple stable window manager
-
-local UI = {}
+-- NexusOS Kernel
+-- Fixed application environment and event routing
 
 --------------------------------------------------
--- State
+-- Boot
 --------------------------------------------------
 
-UI.windows = {}
-UI.nextID = 1
-UI.focused = nil
+term.clear()
+term.setCursorPos(1, 1)
+term.setCursorBlink(true)
 
-UI.startMenu = false
-
-UI.activeMode = nil
-UI.activeWindow = nil
+print("Starting NEXUS OS...")
+sleep(1)
 
 --------------------------------------------------
--- Colors
+-- UI
 --------------------------------------------------
 
-UI.desktopColor = colors.blue
-UI.taskbarColor = colors.gray
-UI.titleColor = colors.gray
-UI.activeTitleColor = colors.lightBlue
-UI.closeColor = colors.red
+local UI = dofile("/os/ui.lua")
 
-UI.minWidth = 14
-UI.minHeight = 7
+UI.init()
 
---------------------------------------------------
--- Native screen
---------------------------------------------------
+local native = term.native()
 
-local function screen()
-    return term.native()
-end
+local screenW, screenH =
+    native.getSize()
 
 --------------------------------------------------
--- Safe number
+-- Applications
 --------------------------------------------------
 
-local function num(value, fallback)
-    if type(value) == "number" then
-        return value
-    end
-
-    return fallback
-end
+local apps = {}
 
 --------------------------------------------------
--- Clamp
+-- Find app for window
 --------------------------------------------------
 
-local function clamp(value, low, high)
-    value = num(value, low)
+local function getApp(win)
 
-    if high < low then
-        return low
-    end
+    for _, app in ipairs(apps) do
 
-    if value < low then
-        return low
-    end
-
-    if value > high then
-        return high
-    end
-
-    return value
-end
-
---------------------------------------------------
--- Window exists
---------------------------------------------------
-
-local function contains(win)
-    if not win then
-        return false
-    end
-
-    for _, w in ipairs(UI.windows) do
-        if w == win then
-            return true
+        if app.window == win then
+            return app
         end
-    end
 
-    return false
-end
-
---------------------------------------------------
--- Get screen size
---------------------------------------------------
-
-local function getScreenSize()
-    local t = screen()
-
-    local w, h = t.getSize()
-
-    w = math.max(1, num(w, 51))
-    h = math.max(2, num(h, 19))
-
-    return w, h
-end
-
---------------------------------------------------
--- Resize application terminal
---------------------------------------------------
-
-local function resizeTerminal(win)
-    if not win or not win.terminal then
-        return
-    end
-
-    local cw = math.max(1, win.width - 2)
-    local ch = math.max(1, win.height - 3)
-
-    win.terminal.reposition(
-        2,
-        3,
-        cw,
-        ch
-    )
-end
-
---------------------------------------------------
--- Create window
---------------------------------------------------
-
-function UI.createWindow(
-    title,
-    x,
-    y,
-    width,
-    height
-)
-
-    local sw, sh = getScreenSize()
-
-    width = clamp(
-        width or 36,
-        UI.minWidth,
-        sw
-    )
-
-    height = clamp(
-        height or 12,
-        UI.minHeight,
-        math.max(UI.minHeight, sh - 1)
-    )
-
-    x = clamp(
-        x or 2,
-        1,
-        math.max(1, sw - width + 1)
-    )
-
-    y = clamp(
-        y or 2,
-        1,
-        math.max(1, sh - height)
-    )
-
-    --------------------------------------------------
-    -- Parent window.
-    --
-    -- IMPORTANT:
-    -- The application owns the inside of this buffer.
-    -- The UI only draws the chrome.
-    --------------------------------------------------
-
-    local surface = window.create(
-        screen(),
-        x,
-        y,
-        width,
-        height,
-        false
-    )
-
-    surface.setBackgroundColor(colors.black)
-    surface.setTextColor(colors.white)
-    surface.clear()
-
-    local win = {
-        id = UI.nextID,
-
-        title = tostring(title or "Window"),
-
-        x = x,
-        y = y,
-
-        width = width,
-        height = height,
-
-        surface = surface,
-        terminal = nil,
-
-        visible = true,
-        minimized = false,
-        focused = false,
-
-        dragging = false,
-        resizing = false,
-
-        dragX = 0,
-        dragY = 0
-    }
-
-    UI.nextID = UI.nextID + 1
-
-    --------------------------------------------------
-    -- Application terminal.
-    --
-    -- It starts at (2,3) inside the window:
-    --
-    -- row 1 = title
-    -- row 2 = separator
-    -- row 3+ = application
-    --------------------------------------------------
-
-    win.terminal = window.create(
-        surface,
-        2,
-        3,
-        math.max(1, width - 2),
-        math.max(1, height - 3),
-        true
-    )
-
-    win.terminal.setBackgroundColor(colors.black)
-    win.terminal.setTextColor(colors.white)
-    win.terminal.clear()
-    win.terminal.setCursorPos(1, 1)
-
-    table.insert(UI.windows, win)
-
-    UI.drawWindow(win)
-
-    surface.setVisible(true)
-
-    UI.focus(win)
-
-    return win
-end
-
---------------------------------------------------
--- Focus
---------------------------------------------------
-
-function UI.focus(win)
-    if not win then
-        return
-    end
-
-    if not contains(win) then
-        return
-    end
-
-    if win.minimized then
-        return
-    end
-
-    --------------------------------------------------
-    -- Clear focus.
-    --------------------------------------------------
-
-    for _, w in ipairs(UI.windows) do
-        w.focused = false
-    end
-
-    --------------------------------------------------
-    -- Move window to top.
-    --------------------------------------------------
-
-    for i, w in ipairs(UI.windows) do
-        if w == win then
-            table.remove(UI.windows, i)
-            break
-        end
-    end
-
-    table.insert(UI.windows, win)
-
-    win.focused = true
-
-    UI.focused = win
-
-    if win.surface then
-        win.surface.setVisible(true)
-    end
-
-    UI.draw()
-end
-
-UI.setFocus = UI.focus
-
---------------------------------------------------
--- Restore
---------------------------------------------------
-
-function UI.restoreWindow(win)
-    if not win then
-        return
-    end
-
-    if not contains(win) then
-        return
-    end
-
-    win.minimized = false
-    win.visible = true
-    win.dragging = false
-    win.resizing = false
-
-    if win.surface then
-        win.surface.setVisible(true)
-    end
-
-    if win.terminal then
-        win.terminal.setVisible(true)
-    end
-
-    UI.focus(win)
-end
-
---------------------------------------------------
--- Find window
---------------------------------------------------
-
-function UI.getWindowAt(x, y)
-    x = num(x, 0)
-    y = num(y, 0)
-
-    for i = #UI.windows, 1, -1 do
-
-        local win = UI.windows[i]
-
-        if win.visible
-            and not win.minimized
-            and x >= win.x
-            and x < win.x + win.width
-            and y >= win.y
-            and y < win.y + win.height then
-
-            return win
-        end
     end
 
     return nil
 end
 
 --------------------------------------------------
--- Desktop
+-- Error display
 --------------------------------------------------
 
-function UI.drawDesktop()
+local function showError(app, message)
 
-    local t = screen()
+    if not app
+        or not app.window
+        or not app.window.terminal then
+        return
+    end
 
-    local width, height = getScreenSize()
+    local t =
+        app.window.terminal
 
-    t.setBackgroundColor(UI.desktopColor)
-    t.setTextColor(colors.white)
+    t.setVisible(true)
+
+    t.setBackgroundColor(
+        colors.black
+    )
+
+    t.setTextColor(
+        colors.red
+    )
 
     t.clear()
 
-    --------------------------------------------------
-    -- Desktop title
-    --------------------------------------------------
-
-    t.setCursorPos(2, 1)
-
-    t.write("NexusOS")
-end
-
---------------------------------------------------
--- Window chrome
---
--- IMPORTANT:
--- We NEVER clear the application area here.
---------------------------------------------------
-
-function UI.drawWindow(win)
-
-    if not win then
-        return
-    end
-
-    if not win.surface then
-        return
-    end
-
-    if not win.visible or win.minimized then
-        return
-    end
-
-    local w = win.surface
-
-    local width = math.max(1, win.width)
-    local height = math.max(1, win.height)
-
-    --------------------------------------------------
-    -- Title
-    --------------------------------------------------
-
-    if win.focused then
-        w.setBackgroundColor(UI.activeTitleColor)
-    else
-        w.setBackgroundColor(UI.titleColor)
-    end
-
-    w.setTextColor(colors.white)
-
-    w.setCursorPos(1, 1)
-    w.write(string.rep(" ", width))
-
-    --------------------------------------------------
-    -- Title text
-    --------------------------------------------------
-
-    local title = tostring(win.title or "Window")
-
-    local maxTitle = math.max(
-        1,
-        width - 10
-    )
-
-    if #title > maxTitle then
-        title = title:sub(1, maxTitle)
-    end
-
-    w.setCursorPos(2, 1)
-    w.write(title)
-
-    --------------------------------------------------
-    -- Minimize
-    --------------------------------------------------
-
-    w.setBackgroundColor(
-        win.focused
-            and UI.activeTitleColor
-            or UI.titleColor
-    )
-
-    w.setCursorPos(
-        math.max(1, width - 5),
-        1
-    )
-
-    w.write("_")
-
-    --------------------------------------------------
-    -- Close
-    --------------------------------------------------
-
-    w.setBackgroundColor(UI.closeColor)
-
-    w.setCursorPos(
-        math.max(1, width - 2),
-        1
-    )
-
-    w.write("X")
-
-    --------------------------------------------------
-    -- Separator
-    --------------------------------------------------
-
-    if height >= 2 then
-
-        w.setBackgroundColor(colors.black)
-        w.setTextColor(colors.white)
-
-        w.setCursorPos(1, 2)
-
-        w.write(
-            string.rep("-", width)
-        )
-    end
-
-    --------------------------------------------------
-    -- Left/right borders
-    --
-    -- Do NOT touch application terminal area
-    -- except for the two border columns.
-    --------------------------------------------------
-
-    if width >= 2 and height >= 5 then
-
-        for row = 3, height - 2 do
-
-            w.setBackgroundColor(colors.black)
-
-            w.setCursorPos(1, row)
-            w.write("|")
-
-            w.setCursorPos(width, row)
-            w.write("|")
-        end
-    end
-
-    --------------------------------------------------
-    -- Bottom border
-    --------------------------------------------------
-
-    if height >= 3 then
-
-        w.setBackgroundColor(colors.black)
-
-        w.setCursorPos(1, height)
-
-        w.write(
-            string.rep("-", width)
-        )
-    end
-
-    --------------------------------------------------
-    -- Resize handle
-    --------------------------------------------------
-
-    if width >= 2 and height >= 2 then
-
-        w.setBackgroundColor(colors.gray)
-        w.setTextColor(colors.white)
-
-        w.setCursorPos(width, height)
-
-        w.write("+")
-    end
-end
-
---------------------------------------------------
--- Taskbar
---------------------------------------------------
-
-function UI.drawTaskbar()
-
-    local t = screen()
-
-    local width, height = getScreenSize()
-
-    t.setBackgroundColor(UI.taskbarColor)
-    t.setTextColor(colors.white)
-
-    t.setCursorPos(1, height)
+    t.setCursorPos(1, 1)
 
     t.write(
-        string.rep(" ", width)
+        "APPLICATION ERROR"
     )
 
-    --------------------------------------------------
-    -- Start
-    --------------------------------------------------
+    local width, height =
+        t.getSize()
 
-    t.setBackgroundColor(colors.gray)
+    local text =
+        tostring(message)
 
-    t.setCursorPos(2, height)
+    local y = 3
 
-    t.write("[ NexusOS ]")
+    while #text > 0
+        and y <= height
+    do
 
-    --------------------------------------------------
-    -- Applications
-    --------------------------------------------------
+        local line =
+            text:sub(1, width)
 
-    local x = 15
+        text =
+            text:sub(#line + 1)
 
-    for _, win in ipairs(UI.windows) do
+        t.setCursorPos(1, y)
+        t.write(line)
 
-        if win.visible then
-
-            local label =
-                "[ " .. tostring(win.title) .. " ]"
-
-            if x + #label <= width then
-
-                if win.minimized then
-
-                    t.setBackgroundColor(
-                        colors.darkGray
-                    )
-
-                elseif win.focused then
-
-                    t.setBackgroundColor(
-                        colors.lightBlue
-                    )
-
-                else
-
-                    t.setBackgroundColor(
-                        colors.gray
-                    )
-                end
-
-                t.setCursorPos(x, height)
-
-                t.write(label)
-
-                x = x + #label + 1
-            end
-        end
+        y = y + 1
     end
 end
 
 --------------------------------------------------
--- Start menu
+-- Create application
 --------------------------------------------------
 
-function UI.drawStartMenu()
+local function createApp(path, title)
 
-    local t = screen()
+    if not fs.exists(path) then
 
-    local width, height = getScreenSize()
+        print(
+            "Application not found: "
+            .. path
+        )
 
-    local menuWidth = math.min(25, width - 2)
-    local menuHeight = 9
-
-    local x = 2
-
-    local y = math.max(
-        1,
-        height - menuHeight
-    )
-
-    t.setBackgroundColor(colors.gray)
-    t.setTextColor(colors.white)
-
-    for row = 0, menuHeight - 1 do
-
-        if y + row < height then
-
-            t.setCursorPos(
-                x,
-                y + row
-            )
-
-            t.write(
-                string.rep(" ", menuWidth)
-            )
-        end
-    end
-
-    t.setCursorPos(x + 2, y + 1)
-
-    t.setTextColor(colors.yellow)
-    t.write("NexusOS")
-
-    t.setTextColor(colors.white)
-
-    t.setCursorPos(x + 2, y + 3)
-    t.write("Terminal")
-
-    t.setCursorPos(x + 2, y + 4)
-    t.write("Files")
-
-    t.setCursorPos(x + 2, y + 5)
-    t.write("Settings")
-
-    t.setCursorPos(x + 2, y + 6)
-    t.write("Close Menu")
-end
-
---------------------------------------------------
--- Draw
---------------------------------------------------
-
-function UI.draw()
-
-    local t = screen()
-
-    --------------------------------------------------
-    -- Hide application surfaces while desktop
-    -- is redrawn.
-    --------------------------------------------------
-
-    for _, win in ipairs(UI.windows) do
-
-        if win.surface then
-            win.surface.setVisible(false)
-        end
-    end
-
-    --------------------------------------------------
-    -- Desktop
-    --------------------------------------------------
-
-    UI.drawDesktop()
-
-    --------------------------------------------------
-    -- Window chrome
-    --------------------------------------------------
-
-    for _, win in ipairs(UI.windows) do
-
-        if win.visible
-            and not win.minimized then
-
-            UI.drawWindow(win)
-        end
-    end
-
-    --------------------------------------------------
-    -- Show windows in correct order.
-    --------------------------------------------------
-
-    for _, win in ipairs(UI.windows) do
-
-        if win.visible
-            and not win.minimized
-            and win.surface then
-
-            win.surface.setVisible(true)
-        end
-    end
-
-    --------------------------------------------------
-    -- Taskbar must be last on native screen.
-    --------------------------------------------------
-
-    UI.drawTaskbar()
-
-    if UI.startMenu then
-        UI.drawStartMenu()
-    end
-end
-
---------------------------------------------------
--- Remove
---------------------------------------------------
-
-function UI.removeWindow(win)
-
-    if not win then
-        return
-    end
-
-    if not contains(win) then
-        return
-    end
-
-    win.dragging = false
-    win.resizing = false
-
-    if win.surface then
-        win.surface.setVisible(false)
-    end
-
-    for i, w in ipairs(UI.windows) do
-
-        if w == win then
-
-            table.remove(UI.windows, i)
-
-            break
-        end
-    end
-
-    if UI.focused == win then
-        UI.focused = nil
-    end
-
-    --------------------------------------------------
-    -- Focus newest remaining window.
-    --------------------------------------------------
-
-    for i = #UI.windows, 1, -1 do
-
-        local other = UI.windows[i]
-
-        if other.visible
-            and not other.minimized then
-
-            UI.focus(other)
-
-            return
-        end
-    end
-
-    UI.draw()
-end
-
---------------------------------------------------
--- Minimize
---------------------------------------------------
-
-function UI.minimize(win)
-
-    if not win then
-        return
-    end
-
-    if not contains(win) then
-        return
-    end
-
-    win.dragging = false
-    win.resizing = false
-
-    win.minimized = true
-    win.visible = true
-    win.focused = false
-
-    if win.surface then
-        win.surface.setVisible(false)
-    end
-
-    if UI.focused == win then
-        UI.focused = nil
-    end
-
-    --------------------------------------------------
-    -- Focus another window.
-    --------------------------------------------------
-
-    for i = #UI.windows, 1, -1 do
-
-        local other = UI.windows[i]
-
-        if other ~= win
-            and other.visible
-            and not other.minimized then
-
-            UI.focus(other)
-
-            return
-        end
-    end
-
-    UI.draw()
-end
-
---------------------------------------------------
--- Taskbar hit
---------------------------------------------------
-
-function UI.getTaskbarWindowAt(x, y)
-
-    local width, height = getScreenSize()
-
-    if y ~= height then
         return nil
     end
 
-    local currentX = 15
+    local offset =
+        (#UI.windows % 4) * 3
 
-    for _, win in ipairs(UI.windows) do
+    local width =
+        math.min(
+            52,
+            math.max(
+                10,
+                screenW - 2
+            )
+        )
 
-        if win.visible then
+    local height =
+        math.min(
+            18,
+            math.max(
+                5,
+                screenH - 2
+            )
+        )
 
-            local label =
-                "[ " .. tostring(win.title) .. " ]"
+    local win =
+        UI.createWindow(
+            title,
+            4 + offset,
+            3 + offset,
+            width,
+            height
+        )
 
-            if currentX + #label <= width then
+    local app = {
 
-                if x >= currentX
-                    and x < currentX + #label then
+        window = win,
 
-                    return win
+        path = path,
+
+        queue = {},
+
+        dead = false,
+
+        closing = false,
+
+        resizeQueued = false
+    }
+
+    table.insert(
+        apps,
+        app
+    )
+
+    --------------------------------------------------
+    -- IMPORTANT:
+    --
+    -- Explicit CraftOS environment.
+    --
+    -- This prevents shell/fs/term/etc from becoming
+    -- nil when the application is loaded.
+    --------------------------------------------------
+
+    local appEnv = {}
+
+    setmetatable(
+        appEnv,
+        {
+            __index = _G
+        }
+    )
+
+    --------------------------------------------------
+    -- Explicitly guarantee CraftOS APIs.
+    --------------------------------------------------
+
+    appEnv.shell = shell
+    appEnv.fs = fs
+    appEnv.term = term
+    appEnv.colors = colors
+    appEnv.keys = keys
+    appEnv.os = os
+    appEnv.window = window
+    appEnv.peripheral = peripheral
+    appEnv.redstone = redstone
+    appEnv.textutils = textutils
+    appEnv.paintutils = paintutils
+
+    --------------------------------------------------
+    -- Load application using explicit environment.
+    --------------------------------------------------
+
+    local program, loadError =
+        loadfile(
+            path,
+            "t",
+            appEnv
+        )
+
+    if not program then
+
+        showError(
+            app,
+            loadError
+        )
+
+        app.dead = true
+
+        return app
+    end
+
+    --------------------------------------------------
+    -- Application coroutine
+    --------------------------------------------------
+
+    app.co =
+        coroutine.create(
+            function()
+
+                local old =
+                    term.current()
+
+                term.redirect(
+                    win.terminal
+                )
+
+                local ok, err =
+                    pcall(
+                        function()
+                            program()
+                        end
+                    )
+
+                term.redirect(old)
+
+                if not ok then
+
+                    if not app.closing then
+
+                        showError(
+                            app,
+                            err
+                        )
+
+                    end
+
                 end
 
-                currentX =
-                    currentX + #label + 1
+                app.dead = true
+            end
+        )
+
+    --------------------------------------------------
+    -- Start program
+    --------------------------------------------------
+
+    local old =
+        term.current()
+
+    term.redirect(
+        win.terminal
+    )
+
+    local ok, err =
+        coroutine.resume(
+            app.co
+        )
+
+    term.redirect(old)
+
+    if not ok then
+
+        showError(
+            app,
+            err
+        )
+
+        app.dead = true
+    end
+
+    return app
+end
+
+--------------------------------------------------
+-- Queue event
+--------------------------------------------------
+
+local function sendEvent(app, event)
+
+    if not app
+        or app.dead
+        or app.closing then
+        return
+    end
+
+    if not app.window.visible
+        or app.window.minimized then
+        return
+    end
+
+    --------------------------------------------------
+    -- Convert screen mouse coordinates into
+    -- application terminal coordinates.
+    --------------------------------------------------
+
+    if event[1] == "mouse_click"
+        or event[1] == "mouse_drag"
+        or event[1] == "mouse_up"
+    then
+
+        local button =
+            event[2]
+
+        local x =
+            event[3]
+            - app.window.x
+            - 1
+
+        local y =
+            event[4]
+            - app.window.y
+            - 2
+
+        event = {
+            event[1],
+            button,
+            x,
+            y
+        }
+    end
+
+    table.insert(
+        app.queue,
+        event
+    )
+end
+
+--------------------------------------------------
+-- Resume applications
+--------------------------------------------------
+
+local function resumeApps()
+
+    for _, app in ipairs(apps) do
+
+        if not app.dead
+            and #app.queue > 0
+        then
+
+            local event =
+                table.remove(
+                    app.queue,
+                    1
+                )
+
+            if event[1] ==
+                "term_resize"
+            then
+                app.resizeQueued = false
+            end
+
+            if coroutine.status(app.co)
+                ~= "dead"
+            then
+
+                local old =
+                    term.current()
+
+                term.redirect(
+                    app.window.terminal
+                )
+
+                local ok, err =
+                    coroutine.resume(
+                        app.co,
+                        table.unpack(event)
+                    )
+
+                term.redirect(old)
+
+                if not ok then
+
+                    app.dead = true
+
+                    if not app.closing then
+
+                        showError(
+                            app,
+                            err
+                        )
+
+                    end
+                end
             end
         end
     end
-
-    return nil
 end
 
 --------------------------------------------------
--- Start drag
+-- Cleanup
 --------------------------------------------------
 
-function UI.startDrag(win, mouseX, mouseY)
+local function cleanup()
 
-    if not win then
-        return
+    for i = #apps, 1, -1 do
+
+        local app =
+            apps[i]
+
+        if app.dead then
+
+            table.remove(
+                apps,
+                i
+            )
+
+            if app.window then
+
+                app.window.visible = false
+
+                if app.window.terminal then
+
+                    app.window.terminal.setVisible(
+                        false
+                    )
+
+                end
+            end
+        end
     end
-
-    UI.focus(win)
-
-    UI.activeMode = "drag"
-    UI.activeWindow = win
-
-    win.dragging = true
-    win.resizing = false
-
-    win.dragX = mouseX - win.x
-    win.dragY = mouseY - win.y
 end
 
 --------------------------------------------------
--- Drag
+-- Resize callback
 --------------------------------------------------
 
-function UI.drag(win, mouseX, mouseY)
+UI.onResize =
+    function(win)
 
-    if not win then
-        return
-    end
+        local app =
+            getApp(win)
 
-    if not win.dragging then
-        return
-    end
+        if not app then
+            return
+        end
 
-    local sw, sh = getScreenSize()
+        if app.resizeQueued then
+            return
+        end
 
-    local newX =
-        mouseX - win.dragX
+        app.resizeQueued = true
 
-    local newY =
-        mouseY - win.dragY
-
-    newX = clamp(
-        newX,
-        1,
-        math.max(1, sw - win.width + 1)
-    )
-
-    newY = clamp(
-        newY,
-        1,
-        math.max(1, sh - win.height)
-    )
-
-    if newX == win.x and newY == win.y then
-        return
-    end
-
-    win.x = newX
-    win.y = newY
-
-    --------------------------------------------------
-    -- Moving the parent moves the application.
-    --------------------------------------------------
-
-    if win.surface then
-
-        win.surface.reposition(
-            win.x,
-            win.y,
-            win.width,
-            win.height
+        table.insert(
+            app.queue,
+            {
+                "term_resize"
+            }
         )
     end
 
-    UI.draw()
-end
-
 --------------------------------------------------
--- Start resize
+-- Close callback
 --------------------------------------------------
 
-function UI.startResize(win)
+UI.onClose =
+    function(win)
 
-    if not win then
-        return
-    end
+        local app =
+            getApp(win)
 
-    UI.focus(win)
+        if app then
 
-    UI.activeMode = "resize"
-    UI.activeWindow = win
+            app.closing = true
 
-    win.resizing = true
-    win.dragging = false
-end
+            table.insert(
+                app.queue,
+                {
+                    "terminate"
+                }
+            )
 
---------------------------------------------------
--- Resize
---------------------------------------------------
+            app.dead = true
 
-function UI.resize(win, mouseX, mouseY)
+        end
 
-    if not win then
-        return
-    end
+        win.visible = false
 
-    if not win.resizing then
-        return
-    end
+        if win.terminal then
+            win.terminal.setVisible(false)
+        end
 
-    local sw, sh = getScreenSize()
+        for i, w in ipairs(UI.windows) do
 
-    local newWidth =
-        mouseX - win.x + 1
+            if w == win then
 
-    local newHeight =
-        mouseY - win.y + 1
+                table.remove(
+                    UI.windows,
+                    i
+                )
 
-    newWidth = math.max(
-        UI.minWidth,
-        newWidth
-    )
+                break
+            end
+        end
 
-    newHeight = math.max(
-        UI.minHeight,
-        newHeight
-    )
+        if UI.focused == win then
+            UI.focused = nil
+        end
 
-    local maxWidth =
-        math.max(1, sw - win.x + 1)
+        --------------------------------------------------
+        -- Focus next window.
+        --------------------------------------------------
 
-    local maxHeight =
-        math.max(1, sh - win.y)
+        for i =
+            #UI.windows,
+            1,
+            -1
+        do
 
-    newWidth =
-        math.min(
-            newWidth,
-            maxWidth
-        )
+            local other =
+                UI.windows[i]
 
-    newHeight =
-        math.min(
-            newHeight,
-            maxHeight
-        )
+            if other.visible
+                and not other.minimized
+            then
 
-    win.width = newWidth
-    win.height = newHeight
+                UI.focus(other)
 
-    if win.surface then
-
-        win.surface.reposition(
-            win.x,
-            win.y,
-            win.width,
-            win.height
-        )
-    end
-
-    resizeTerminal(win)
-
-    UI.draw()
-
-    if UI.onResize then
-        UI.onResize(win)
-    end
-end
-
---------------------------------------------------
--- Stop mouse
---------------------------------------------------
-
-function UI.stopMouseOperation()
-
-    local active =
-        UI.activeMode ~= nil
-
-    if UI.activeWindow then
-
-        UI.activeWindow.dragging = false
-        UI.activeWindow.resizing = false
-    end
-
-    UI.activeMode = nil
-    UI.activeWindow = nil
-
-    return active
-end
-
---------------------------------------------------
--- Mouse
---------------------------------------------------
-
-function UI.mouseClick(button, x, y)
-
-    local width, height = getScreenSize()
-
-    --------------------------------------------------
-    -- Start button
-    --------------------------------------------------
-
-    if y == height
-        and x >= 2
-        and x <= 13 then
-
-        UI.startMenu = not UI.startMenu
+                break
+            end
+        end
 
         UI.draw()
+    end
 
-        return true
+--------------------------------------------------
+-- Launch callback
+--------------------------------------------------
+
+UI.onLaunch =
+    function(name)
+
+        if name == "terminal" then
+
+            createApp(
+                "/apps/terminal.lua",
+                "Terminal"
+            )
+
+        elseif name == "files" then
+
+            createApp(
+                "/apps/files.lua",
+                "Files"
+            )
+
+        elseif name == "settings" then
+
+            if fs.exists(
+                "/apps/settings.lua"
+            ) then
+
+                createApp(
+                    "/apps/settings.lua",
+                    "Settings"
+                )
+
+            else
+
+                print(
+                    "Settings app not installed."
+                )
+
+            end
+        end
+
+        UI.draw()
+    end
+
+--------------------------------------------------
+-- Mouse handling
+--------------------------------------------------
+
+local function handleMouse(event)
+
+    --------------------------------------------------
+    -- UI gets first chance.
+    --
+    -- This handles dragging, resizing, minimize,
+    -- close, taskbar and Start menu.
+    --------------------------------------------------
+
+    local consumed =
+        UI.handleEvent(
+            table.unpack(event)
+        )
+
+    if consumed then
+        return
     end
 
     --------------------------------------------------
-    -- Taskbar
-    --------------------------------------------------
-
-    if y == height then
-
-        local task =
-            UI.getTaskbarWindowAt(x, y)
-
-        if task then
-
-            if task.minimized then
-
-                UI.restoreWindow(task)
-
-            elseif UI.focused ~= task then
-
-                UI.focus(task)
-
-            end
-
-            return true
-        end
-    end
-
-    --------------------------------------------------
-    -- Start menu
-    --------------------------------------------------
-
-    if UI.startMenu then
-
-        local menuX = 2
-        local menuY = math.max(1, height - 9)
-
-        if x >= menuX
-            and x <= menuX + 25
-            and y == menuY + 3 then
-
-            UI.startMenu = false
-
-            if UI.onLaunch then
-                UI.onLaunch("terminal")
-            end
-
-            UI.draw()
-
-            return true
-        end
-
-        if x >= menuX
-            and x <= menuX + 25
-            and y == menuY + 4 then
-
-            UI.startMenu = false
-
-            if UI.onLaunch then
-                UI.onLaunch("files")
-            end
-
-            UI.draw()
-
-            return true
-        end
-
-        if x >= menuX
-            and x <= menuX + 25
-            and y == menuY + 5 then
-
-            UI.startMenu = false
-
-            if UI.onLaunch then
-                UI.onLaunch("settings")
-            end
-
-            UI.draw()
-
-            return true
-        end
-
-        if y == menuY + 6 then
-
-            UI.startMenu = false
-
-            UI.draw()
-
-            return true
-        end
-
-        --------------------------------------------------
-        -- Don't click through the menu.
-        --------------------------------------------------
-
-        if x >= menuX
-            and x <= menuX + 25
-            and y >= menuY
-            and y < height then
-
-            return true
-        end
-    end
-
-    --------------------------------------------------
-    -- Window
+    -- Send content clicks to focused app.
     --------------------------------------------------
 
     local win =
-        UI.getWindowAt(x, y)
+        UI.focused
 
-    if not win then
-        return false
+    if not win
+        or not win.visible
+        or win.minimized
+    then
+        return
     end
 
+    local x =
+        event[3]
+
+    local y =
+        event[4]
+
     --------------------------------------------------
-    -- Focus.
+    -- Application content area.
     --------------------------------------------------
 
-    UI.focus(win)
-
-    --------------------------------------------------
-    -- Close
-    --------------------------------------------------
-
-    if y == win.y
-        and x == win.x + win.width - 2 then
-
-        if UI.onClose then
-            UI.onClose(win)
-        else
-            UI.removeWindow(win)
-        end
-
-        return true
+    if x < win.x + 1
+        or x >= win.x + win.width - 1
+        or y < win.y + 2
+        or y >= win.y + win.height - 1
+    then
+        return
     end
 
-    --------------------------------------------------
-    -- Minimize
-    --------------------------------------------------
+    local app =
+        getApp(win)
 
-    if y == win.y
-        and x >= win.x + win.width - 5
-        and x <= win.x + win.width - 4 then
+    if app then
 
-        UI.minimize(win)
+        sendEvent(
+            app,
+            event
+        )
 
-        return true
     end
+end
+
+--------------------------------------------------
+-- Keyboard handling
+--------------------------------------------------
+
+local function handleKeyboard(event)
+
+    local win =
+        UI.focused
+
+    if not win
+        or not win.visible
+        or win.minimized
+    then
+        return
+    end
+
+    local app =
+        getApp(win)
+
+    if app then
+
+        sendEvent(
+            app,
+            event
+        )
+
+    end
+end
+
+--------------------------------------------------
+-- Start Terminal
+--------------------------------------------------
+
+createApp(
+    "/apps/terminal.lua",
+    "Terminal"
+)
+
+UI.draw()
+
+--------------------------------------------------
+-- Main event loop
+--------------------------------------------------
+
+while true do
+
+    local event = {
+        os.pullEvent()
+    }
+
+    local name =
+        event[1]
+
+    --------------------------------------------------
+    -- Mouse
+    --------------------------------------------------
+
+    if name == "mouse_click"
+        or name == "mouse_drag"
+        or name == "mouse_up"
+    then
+
+        handleMouse(event)
+
+    --------------------------------------------------
+    -- Keyboard
+    --------------------------------------------------
+
+    elseif name == "key"
+        or name == "key_up"
+        or name == "char"
+        or name == "paste"
+    then
+
+        handleKeyboard(event)
 
     --------------------------------------------------
     -- Resize
     --------------------------------------------------
 
-    if x == win.x + win.width - 1
-        and y == win.y + win.height - 1 then
+    elseif name == "term_resize" then
 
-        UI.startResize(win)
+        for _, app in ipairs(apps) do
 
-        return true
+            if not app.resizeQueued then
+
+                app.resizeQueued = true
+
+                table.insert(
+                    app.queue,
+                    {
+                        "term_resize"
+                    }
+                )
+
+            end
+        end
     end
 
     --------------------------------------------------
-    -- Title bar
+    -- Run application events.
     --------------------------------------------------
 
-    if y == win.y then
-
-        UI.startDrag(
-            win,
-            x,
-            y
-        )
-
-        return true
-    end
+    resumeApps()
 
     --------------------------------------------------
-    -- Content is for app.
+    -- Remove dead apps.
     --------------------------------------------------
 
-    return false
+    cleanup()
 end
-
---------------------------------------------------
--- Mouse drag
---------------------------------------------------
-
-function UI.mouseDrag(button, x, y)
-
-    if UI.activeMode == "drag"
-        and UI.activeWindow then
-
-        UI.drag(
-            UI.activeWindow,
-            x,
-            y
-        )
-
-        return true
-    end
-
-    if UI.activeMode == "resize"
-        and UI.activeWindow then
-
-        UI.resize(
-            UI.activeWindow,
-            x,
-            y
-        )
-
-        return true
-    end
-
-    return false
-end
-
---------------------------------------------------
--- Mouse up
---------------------------------------------------
-
-function UI.mouseUp()
-
-    return UI.stopMouseOperation()
-end
-
---------------------------------------------------
--- Event handler
---------------------------------------------------
-
-function UI.handleEvent(event, ...)
-
-    if event == "mouse_click" then
-
-        return UI.mouseClick(...)
-
-    elseif event == "mouse_drag" then
-
-        return UI.mouseDrag(...)
-
-    elseif event == "mouse_up" then
-
-        return UI.mouseUp(...)
-    end
-
-    return false
-end
-
---------------------------------------------------
--- Redirect
---------------------------------------------------
-
-function UI.redirect(win)
-
-    if not win then
-        return false
-    end
-
-    if not win.terminal then
-        return false
-    end
-
-    term.redirect(win.terminal)
-
-    return true
-end
-
---------------------------------------------------
--- Restore native
---------------------------------------------------
-
-function UI.restore()
-
-    term.redirect(
-        term.native()
-    )
-end
-
---------------------------------------------------
--- Init
---------------------------------------------------
-
-function UI.init()
-
-    UI.windows = {}
-    UI.nextID = 1
-    UI.focused = nil
-
-    UI.startMenu = false
-
-    UI.activeMode = nil
-    UI.activeWindow = nil
-
-    UI.draw()
-end
-
-return UI
