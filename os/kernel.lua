@@ -1,40 +1,41 @@
 -- NexusOS Kernel
--- Event-routed application manager
-
-term.clear()
-term.setCursorPos(1, 1)
-term.setCursorBlink(true)
-
-print("Starting NEXUS OS...")
-sleep(1)
+-- Simple cooperative application manager
 
 --------------------------------------------------
 -- Load UI
 --------------------------------------------------
 
-local UI =
-    dofile("/os/ui.lua")
+local UI = dofile("/os/ui.lua")
 
 UI.init()
 
-local native =
-    term.native()
-
-local screenW,
-    screenH =
-    native.getSize()
+local native = term.native()
 
 --------------------------------------------------
--- Application processes
+-- Applications
 --------------------------------------------------
 
 local apps = {}
 
 --------------------------------------------------
--- Find application belonging to window
+-- Screen size
 --------------------------------------------------
 
-local function getAppForWindow(win)
+local function screenSize()
+
+    local w, h = native.getSize()
+
+    w = tonumber(w) or 51
+    h = tonumber(h) or 19
+
+    return w, h
+end
+
+--------------------------------------------------
+-- Find app
+--------------------------------------------------
+
+local function getApp(win)
 
     for _, app in ipairs(apps) do
 
@@ -47,294 +48,103 @@ local function getAppForWindow(win)
 end
 
 --------------------------------------------------
--- Queue terminal resize event
+-- Draw crash screen
 --------------------------------------------------
 
-local function queueResize(app)
+local function showCrash(app, err)
 
-    if not app
-        or app.dead
-        or app.closing then
-
+    if not app or not app.window then
         return
     end
 
-    --------------------------------------------------
-    -- Multiple resize events can happen while the
-    -- application is busy.
-    --
-    -- One term_resize event is enough because when
-    -- the application receives it, term.getSize()
-    -- already contains the current size.
-    --------------------------------------------------
+    local terminal =
+        app.window.terminal
 
-    if app.resizeQueued then
+    if not terminal then
         return
     end
 
-    app.resizeQueued = true
+    terminal.setBackgroundColor(colors.black)
+    terminal.setTextColor(colors.red)
 
-    table.insert(
-        app.queue,
-        {
-            "term_resize"
-        }
-    )
+    terminal.clear()
+    terminal.setCursorPos(1, 1)
+
+    terminal.write("APPLICATION CRASHED")
+
+    terminal.setTextColor(colors.white)
+
+    terminal.setCursorPos(1, 3)
+    terminal.write("Application: " .. tostring(app.title))
+
+    terminal.setCursorPos(1, 4)
+    terminal.write("File: " .. tostring(app.path))
+
+    terminal.setCursorPos(1, 6)
+    terminal.setTextColor(colors.red)
+    terminal.write("Error:")
+
+    terminal.setTextColor(colors.white)
+
+    --------------------------------------------------
+    -- Print wrapped error.
+    --------------------------------------------------
+
+    local width, height =
+        terminal.getSize()
+
+    width = math.max(1, tonumber(width) or 1)
+    height = math.max(1, tonumber(height) or 1)
+
+    local text = tostring(err or "Unknown error")
+
+    local line = 7
+
+    while #text > 0 and line <= height do
+
+        local part = text:sub(1, width)
+
+        terminal.setCursorPos(1, line)
+        terminal.write(part)
+
+        text = text:sub(#part + 1)
+
+        line = line + 1
+    end
+
+    terminal.setCursorPos(1, math.min(height, line + 1))
+
+    terminal.setTextColor(colors.yellow)
+    terminal.write("The application has stopped.")
+
+    terminal.setTextColor(colors.white)
+
+    app.dead = true
+    app.crashed = true
+    app.error = tostring(err or "Unknown error")
+
+    --------------------------------------------------
+    -- Keep window alive.
+    --------------------------------------------------
+
+    app.window.visible = true
+    app.window.minimized = false
+
+    UI.focus(app.window)
 end
 
 --------------------------------------------------
--- Create an application
+-- Queue event
 --------------------------------------------------
 
-local function createApp(
-    path,
-    title
-)
+local function queue(app, event)
 
-    if not fs.exists(path) then
-
-        print(
-            "App not found: "
-            .. path
-        )
-
-        return nil
-    end
-
-    local offset =
-        (#UI.windows % 4) * 3
-
-    local win =
-        UI.createWindow(
-            title
-                or fs.getName(path),
-
-            4 + offset,
-            3 + offset,
-
-            math.min(
-                52,
-                screenW - 2
-            ),
-
-            math.min(
-                18,
-                screenH - 2
-            )
-        )
-
-    local app = {
-
-        window = win,
-
-        path = path,
-
-        queue = {},
-
-        dead = false,
-
-        closing = false,
-
-        resizeQueued = false
-    }
-
-    table.insert(
-        apps,
-        app
-    )
-
-    --------------------------------------------------
-    -- Application coroutine
-    --------------------------------------------------
-
-    app.co =
-        coroutine.create(
-            function()
-
-                local old =
-                    term.current()
-
-                term.redirect(
-                    win.terminal
-                )
-
-                local ok, err =
-                    pcall(
-                        function()
-
-                            shell.run(path)
-                        end
-                    )
-
-                term.redirect(old)
-
-                --------------------------------------------------
-                -- Normal application exit
-                --------------------------------------------------
-
-                if ok then
-
-                    app.dead = true
-
-                    return
-                end
-
-                --------------------------------------------------
-                -- Termination is expected when closing.
-                --------------------------------------------------
-
-                if app.closing then
-
-                    app.dead = true
-
-                    return
-                end
-
-                --------------------------------------------------
-                -- Application crashed.
-                --------------------------------------------------
-
-                if win.visible then
-
-                    win.terminal.setTextColor(
-                        colors.red
-                    )
-
-                    win.terminal.setCursorPos(
-                        1,
-                        1
-                    )
-
-                    win.terminal.write(
-                        "Application error:"
-                    )
-
-                    win.terminal.setCursorPos(
-                        1,
-                        2
-                    )
-
-                    win.terminal.write(
-                        tostring(err)
-                    )
-                end
-
-                app.dead = true
-            end
-        )
-
-    --------------------------------------------------
-    -- Start application
-    --------------------------------------------------
-
-    local old =
-        term.current()
-
-    term.redirect(
-        win.terminal
-    )
-
-    local ok, err =
-        coroutine.resume(
-            app.co
-        )
-
-    term.redirect(old)
-
-    if not ok then
-
-        print(
-            "Failed to start "
-            .. path
-        )
-
-        print(err)
-
-        app.dead = true
-    end
-
-    return app
-end
-
---------------------------------------------------
--- Remove dead applications
---------------------------------------------------
-
-local function cleanupApps()
-
-    for i = #apps, 1, -1 do
-
-        local app =
-            apps[i]
-
-        if app.dead then
-
-            table.remove(
-                apps,
-                i
-            )
-
-            if app.window then
-                app.window.visible = false
-
-                if app.window.terminal then
-                    app.window.terminal.setVisible(false)
-                end
-            end
-        end
-    end
-end
-
---------------------------------------------------
--- Send event to application
---------------------------------------------------
-
-local function sendToApp(
-    app,
-    event
-)
-
-    if not app
-        or app.dead
-        or app.closing
-        or not app.window.visible
-        or app.window.minimized then
-
+    if not app then
         return
     end
 
-    --------------------------------------------------
-    -- Translate mouse coordinates from screen space
-    -- into window-terminal space.
-    --------------------------------------------------
-
-    if event[1] == "mouse_click"
-        or event[1] == "mouse_up"
-        or event[1] == "mouse_drag" then
-
-        local button =
-            event[2]
-
-        local x =
-            event[3]
-            - app.window.x
-            - 1
-
-        local y =
-            event[4]
-            - app.window.y
-            - 2
-
-        event = {
-
-            event[1],
-
-            button,
-
-            x,
-
-            y
-        }
+    if app.dead then
+        return
     end
 
     table.insert(
@@ -344,278 +154,398 @@ local function sendToApp(
 end
 
 --------------------------------------------------
--- Resume applications
+-- Create application
 --------------------------------------------------
 
-local function resumeApps()
+local function createApp(path, title)
 
-    for _, app in ipairs(apps) do
+    if not fs.exists(path) then
 
-        if not app.dead
-            and #app.queue > 0 then
+        local t = native
 
-            local event =
-                table.remove(
-                    app.queue,
-                    1
-                )
+        t.setBackgroundColor(colors.black)
+        t.setTextColor(colors.red)
 
-            --------------------------------------------------
-            -- Resize event has now been consumed.
-            --------------------------------------------------
+        t.setCursorPos(1, 1)
 
-            if event[1] == "term_resize" then
-                app.resizeQueued = false
-            end
+        t.write(
+            "Application not found: "
+            .. path
+        )
 
-            if coroutine.status(app.co)
-                ~= "dead" then
+        return nil
+    end
 
-                local old =
-                    term.current()
+    local sw, sh =
+        screenSize()
 
-                --------------------------------------------------
-                -- Give application its terminal
-                --------------------------------------------------
+    local count =
+        #UI.windows
 
-                term.redirect(
-                    app.window.terminal
-                )
+    local offset =
+        (count % 4) * 3
 
-                local ok, err =
-                    coroutine.resume(
-                        app.co,
-                        table.unpack(event)
-                    )
+    local width =
+        math.min(
+            46,
+            math.max(
+                20,
+                sw - 4
+            )
+        )
 
-                --------------------------------------------------
-                -- Restore native screen
-                --------------------------------------------------
+    local height =
+        math.min(
+            14,
+            math.max(
+                8,
+                sh - 3
+            )
+        )
 
-                term.redirect(old)
+    local x =
+        math.max(
+            1,
+            3 + offset
+        )
 
-                --------------------------------------------------
-                -- Application crashed.
-                --------------------------------------------------
+    local y =
+        math.max(
+            1,
+            2 + offset
+        )
 
-                if not ok then
+    if x + width - 1 > sw then
+        x = math.max(1, sw - width + 1)
+    end
 
-                    app.dead = true
+    if y + height > sh then
+        y = math.max(1, sh - height)
+    end
 
-                    if not app.closing
-                        and app.window.visible then
+    local win =
+        UI.createWindow(
+            title or fs.getName(path),
+            x,
+            y,
+            width,
+            height
+        )
 
-                        app.window.terminal.setTextColor(
-                            colors.red
-                        )
+    local app = {
 
-                        app.window.terminal.setCursorPos(
-                            1,
-                            1
-                        )
+        path = path,
+        title = title or fs.getName(path),
 
-                        app.window.terminal.write(
-                            "Application crashed:"
-                        )
+        window = win,
 
-                        app.window.terminal.setCursorPos(
-                            1,
-                            2
-                        )
+        queue = {},
 
-                        app.window.terminal.write(
-                            tostring(err)
-                        )
+        co = nil,
+
+        dead = false,
+        crashed = false,
+        closing = false,
+
+        error = nil
+    }
+
+    --------------------------------------------------
+    -- Application coroutine.
+    --------------------------------------------------
+
+    app.co = coroutine.create(
+        function(firstEvent)
+
+            UI.redirect(win)
+
+            local ok, err =
+                pcall(
+                    function()
+
+                        local fn =
+                            assert(
+                                loadfile(path)
+                            )
+
+                        fn()
+
                     end
-                end
+                )
+
+            UI.restore()
+
+            if not ok then
+                error(err)
             end
+        end
+    )
 
-            --------------------------------------------------
-            -- Coroutine may have finished normally.
-            --------------------------------------------------
+    table.insert(
+        apps,
+        app
+    )
 
-            if coroutine.status(app.co)
-                == "dead" then
+    --------------------------------------------------
+    -- Start application.
+    --------------------------------------------------
 
-                app.dead = true
-            end
+    local ok, err =
+        coroutine.resume(
+            app.co
+        )
+
+    if not ok then
+
+        showCrash(
+            app,
+            err
+        )
+
+    end
+
+    return app
+end
+
+--------------------------------------------------
+-- Close application
+--------------------------------------------------
+
+local function closeApp(app)
+
+    if not app then
+        return
+    end
+
+    app.closing = true
+
+    if app.co
+        and coroutine.status(app.co) ~= "dead"
+    then
+
+        queue(
+            app,
+            {
+                "terminate"
+            }
+        )
+    end
+
+    UI.removeWindow(
+        app.window
+    )
+
+    for i, a in ipairs(apps) do
+
+        if a == app then
+
+            table.remove(
+                apps,
+                i
+            )
+
+            break
         end
     end
 end
 
 --------------------------------------------------
--- Launch apps from Start Menu
+-- Launch
 --------------------------------------------------
 
-UI.onLaunch =
-    function(appName)
+local function launch(name)
 
-        if appName == "terminal" then
+    if name == "terminal" then
 
-            createApp(
-                "/apps/terminal.lua",
-                "Terminal"
+        createApp(
+            "/apps/terminal.lua",
+            "Terminal"
+        )
+
+    elseif name == "files" then
+
+        createApp(
+            "/apps/files.lua",
+            "Files"
+        )
+
+    elseif name == "settings" then
+
+        createApp(
+            "/apps/settings.lua",
+            "Settings"
+        )
+    end
+
+    UI.draw()
+end
+
+UI.onLaunch = launch
+
+--------------------------------------------------
+-- Close callback
+--------------------------------------------------
+
+UI.onClose = function(win)
+
+    local app = getApp(win)
+
+    if app then
+        closeApp(app)
+    else
+        UI.removeWindow(win)
+    end
+end
+
+--------------------------------------------------
+-- Send event to app
+--------------------------------------------------
+
+local function sendToApp(app, event)
+
+    if not app then
+        return
+    end
+
+    if app.dead then
+        return
+    end
+
+    if app.closing then
+        return
+    end
+
+    if not app.window.visible then
+        return
+    end
+
+    if app.window.minimized then
+        return
+    end
+
+    local e = {}
+
+    for i = 1, #event do
+        e[i] = event[i]
+    end
+
+    --------------------------------------------------
+    -- Convert screen mouse coordinates into
+    -- application-terminal coordinates.
+    --------------------------------------------------
+
+    if e[1] == "mouse_click"
+        or e[1] == "mouse_drag"
+        or e[1] == "mouse_up"
+    then
+
+        local sx =
+            tonumber(e[3]) or 1
+
+        local sy =
+            tonumber(e[4]) or 1
+
+        local tx =
+            sx - app.window.x - 1
+
+        local ty =
+            sy - app.window.y - 2
+
+        e[3] = tx
+        e[4] = ty
+    end
+
+    table.insert(
+        app.queue,
+        e
+    )
+end
+
+--------------------------------------------------
+-- Resume one app
+--------------------------------------------------
+
+local function resumeApp(app)
+
+    if not app then
+        return
+    end
+
+    if app.dead then
+        return
+    end
+
+    if #app.queue == 0 then
+        return
+    end
+
+    if not app.co then
+        return
+    end
+
+    if coroutine.status(app.co) == "dead" then
+        return
+    end
+
+    local event =
+        table.remove(
+            app.queue,
+            1
+        )
+
+    --------------------------------------------------
+    -- Give application its terminal.
+    --------------------------------------------------
+
+    local old =
+        term.current()
+
+    term.redirect(
+        app.window.terminal
+    )
+
+    local ok, err =
+        coroutine.resume(
+            app.co,
+            table.unpack(event)
+        )
+
+    term.redirect(old)
+
+    if not ok then
+
+        showCrash(
+            app,
+            err
+        )
+
+    elseif coroutine.status(app.co) == "dead" then
+
+        --------------------------------------------------
+        -- Normal application exit.
+        --------------------------------------------------
+
+        if not app.closing
+            and not app.crashed
+        then
+
+            app.dead = true
+
+            UI.removeWindow(
+                app.window
             )
-
-        elseif appName == "files" then
-
-            if fs.exists(
-                "/apps/files.lua"
-            ) then
-
-                createApp(
-                    "/apps/files.lua",
-                    "Files"
-                )
-
-            else
-
-                print(
-                    "Files app not found."
-                )
-            end
-
-        elseif appName == "settings" then
-
-            if fs.exists(
-                "/apps/settings.lua"
-            ) then
-
-                createApp(
-                    "/apps/settings.lua",
-                    "Settings"
-                )
-
-            else
-
-                print(
-                    "Settings app not found."
-                )
-            end
-        end
-
-        UI.draw()
-    end
-
---------------------------------------------------
--- Window resize callback
---------------------------------------------------
-
-UI.onResize =
-    function(win)
-
-        local app =
-            getAppForWindow(win)
-
-        if app then
-
-            queueResize(app)
         end
     end
+end
 
 --------------------------------------------------
--- Close window
---------------------------------------------------
-
-UI.onClose =
-    function(win)
-
-        local app =
-            getAppForWindow(win)
-
-        --------------------------------------------------
-        -- Ask application to terminate.
-        --------------------------------------------------
-
-        if app
-            and not app.dead
-            and not app.closing then
-
-            app.closing = true
-
-            table.insert(
-                app.queue,
-                {
-                    "terminate"
-                }
-            )
-        end
-
-        --------------------------------------------------
-        -- Hide window immediately.
-        --
-        -- The coroutine remains alive until it has had
-        -- a chance to process terminate.
-        --------------------------------------------------
-
-        win.visible = false
-
-        if win.terminal then
-            win.terminal.setVisible(false)
-        end
-
-        --------------------------------------------------
-        -- Remove window from UI.
-        --------------------------------------------------
-
-        for i, w in ipairs(UI.windows) do
-
-            if w == win then
-
-                table.remove(
-                    UI.windows,
-                    i
-                )
-
-                break
-            end
-        end
-
-        if UI.focused == win then
-            UI.focused = nil
-        end
-
-        --------------------------------------------------
-        -- Focus another window.
-        --------------------------------------------------
-
-        for i =
-            #UI.windows,
-            1,
-            -1
-        do
-
-            local other =
-                UI.windows[i]
-
-            if other.visible
-                and not other.minimized then
-
-                UI.focus(other)
-
-                break
-            end
-        end
-
-        UI.draw()
-    end
-
---------------------------------------------------
--- Mouse event routing
+-- Route mouse
 --------------------------------------------------
 
 local function handleMouse(event)
 
     --------------------------------------------------
-    -- Let the UI decide first.
-    --
-    -- This handles:
-    -- X
-    -- minimize
-    -- taskbar
-    -- Start menu
-    -- dragging
-    -- resizing
+    -- UI gets first chance.
     --------------------------------------------------
 
     local consumed =
@@ -628,104 +558,223 @@ local function handleMouse(event)
     end
 
     --------------------------------------------------
-    -- Content events go to focused app.
+    -- Focused app.
     --------------------------------------------------
 
-    local focused =
+    local win =
         UI.focused
 
-    if not focused
-        or not focused.visible
-        or focused.minimized then
-
+    if not win then
         return
     end
 
+    if not win.visible
+        or win.minimized then
+        return
+    end
+
+    local app =
+        getApp(win)
+
+    if not app then
+        return
+    end
+
+    --------------------------------------------------
+    -- Only application content.
+    --------------------------------------------------
+
     local x =
-        event[3]
+        tonumber(event[3]) or 0
 
     local y =
-        event[4]
-
-    --------------------------------------------------
-    -- Check whether mouse is inside the application
-    -- terminal area.
-    --------------------------------------------------
+        tonumber(event[4]) or 0
 
     local inside =
-        x >= focused.x + 1
-        and x < focused.x + focused.width - 1
-        and y >= focused.y + 2
-        and y < focused.y + focused.height - 1
+        x >= win.x + 1
+        and x < win.x + win.width - 1
+        and y >= win.y + 2
+        and y < win.y + win.height - 1
 
     if not inside then
         return
     end
 
-    local app =
-        getAppForWindow(
-            focused
-        )
-
-    if app then
-
-        sendToApp(
-            app,
-            event
-        )
-    end
+    sendToApp(
+        app,
+        event
+    )
 end
 
 --------------------------------------------------
--- Keyboard routing
+-- Keyboard
 --------------------------------------------------
 
 local function handleKeyboard(event)
 
-    local focused =
+    local win =
         UI.focused
 
-    if not focused
-        or not focused.visible
-        or focused.minimized then
+    if not win then
+        return
+    end
 
+    if not win.visible
+        or win.minimized then
         return
     end
 
     local app =
-        getAppForWindow(
-            focused
-        )
+        getApp(win)
 
-    if app then
+    if not app then
+        return
+    end
 
-        sendToApp(
-            app,
-            event
-        )
+    sendToApp(
+        app,
+        event
+    )
+end
+
+--------------------------------------------------
+-- Character
+--------------------------------------------------
+
+local function handleChar(event)
+
+    handleKeyboard(event)
+end
+
+--------------------------------------------------
+-- Timer / paste / other events
+--------------------------------------------------
+
+local function broadcast(event)
+
+    for _, app in ipairs(apps) do
+
+        if not app.dead
+            and not app.closing
+        then
+
+            --------------------------------------------------
+            -- Only send general events to the focused app.
+            --------------------------------------------------
+
+            if app.window == UI.focused then
+
+                sendToApp(
+                    app,
+                    event
+                )
+            end
+        end
     end
 end
 
 --------------------------------------------------
--- Start first terminal
+-- Resize screen
 --------------------------------------------------
 
-createApp(
-    "/apps/terminal.lua",
-    "Terminal"
-)
+local function handleResize()
 
-UI.draw()
+    local sw, sh =
+        screenSize()
+
+    for _, app in ipairs(apps) do
+
+        if not app.dead then
+
+            local win =
+                app.window
+
+            if win.x + win.width - 1 > sw then
+
+                win.x =
+                    math.max(
+                        1,
+                        sw - win.width + 1
+                    )
+            end
+
+            if win.y + win.height > sh then
+
+                win.y =
+                    math.max(
+                        1,
+                        sh - win.height
+                    )
+            end
+
+            if win.surface then
+
+                win.surface.reposition(
+                    win.x,
+                    win.y,
+                    win.width,
+                    win.height
+                )
+            end
+
+            UI.onResize =
+                function(resized)
+
+                    local appForResize =
+                        getApp(resized)
+
+                    if appForResize then
+                        queue(
+                            appForResize,
+                            {
+                                "term_resize"
+                            }
+                        )
+                    end
+                end
+
+            if app.window == UI.focused then
+                queue(
+                    app,
+                    {
+                        "term_resize"
+                    }
+                )
+            end
+        end
+    end
+
+    UI.draw()
+end
 
 --------------------------------------------------
--- MAIN NEXUSOS LOOP
+-- Initial apps
+--------------------------------------------------
+
+launch("terminal")
+
+--------------------------------------------------
+-- Main loop
 --------------------------------------------------
 
 while true do
 
-    local event = {
-        os.pullEvent()
-    }
+    --------------------------------------------------
+    -- Let queued application events run.
+    --------------------------------------------------
+
+    for _, app in ipairs(apps) do
+        resumeApp(app)
+    end
+
+    --------------------------------------------------
+    -- Get next OS event.
+    --------------------------------------------------
+
+    local event =
+        table.pack(
+            os.pullEvent()
+        )
 
     local name =
         event[1]
@@ -736,7 +785,8 @@ while true do
 
     if name == "mouse_click"
         or name == "mouse_drag"
-        or name == "mouse_up" then
+        or name == "mouse_up"
+    then
 
         handleMouse(event)
 
@@ -746,29 +796,55 @@ while true do
 
     elseif name == "key"
         or name == "key_up"
-        or name == "char"
-        or name == "paste" then
+    then
 
         handleKeyboard(event)
+
+    --------------------------------------------------
+    -- Character
+    --------------------------------------------------
+
+    elseif name == "char" then
+
+        handleChar(event)
+
+    --------------------------------------------------
+    -- Paste
+    --------------------------------------------------
+
+    elseif name == "paste" then
+
+        handleKeyboard(event)
+
+    --------------------------------------------------
+    -- Term resize
+    --------------------------------------------------
+
+    elseif name == "term_resize" then
+
+        handleResize()
 
     --------------------------------------------------
     -- Timer
     --------------------------------------------------
 
-    elseif name == "timer" then
+    elseif name == "timer"
+        or name == "alarm"
+        or name == "redstone"
+        or name == "disk"
+        or name == "disk_eject"
+        or name == "modem_message"
+        or name == "http_success"
+        or name == "http_failure"
+        or name == "http_check"
+    then
 
-        handleKeyboard(event)
+        broadcast(event)
     end
 
     --------------------------------------------------
-    -- Let applications process queued events.
+    -- Redraw GUI after events.
     --------------------------------------------------
 
-    resumeApps()
-
-    --------------------------------------------------
-    -- Clean dead applications.
-    --------------------------------------------------
-
-    cleanupApps()
+    UI.draw()
 end
